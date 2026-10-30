@@ -1,0 +1,40 @@
+bridge:
+  host: 127.0.0.1
+  port: 8000
+  api_token_ref: keyring:webbridge/api_token
+
+workspace:
+  root: ~/projects/current
+  dangerous_commands: confirm
+
+humanize:
+  min_delay_s: 1.2
+  max_delay_s: 4.5
+  typing_mode: paste
+  between_requests_s: [3, 9]
+
+services:
+  deepseek:
+    enabled: true
+    base_url: https://chat.deepseek.com/
+    profile_dir: ~/.webbridge/profiles/deepseek
+    browser:
+      channel: chrome
+      headless: false
+    selectors_file: ~/.webbridge/selectors/deepseek.yaml
+    models:
+      ds-chat: "DeepSeek"
+      ds-reasoner: "DeepSeek-R1"
+    limits:
+      max_message_chars: 50000
+      max_requests_per_hour: 25
+      max_requests_per_day: 200
+      max_parallel_chats: 1
+    tier2:
+      enabled: false
+    protocol_format: xml
+
+routing:
+  default_model: ds-chat
+  fallbacks:
+    ds-chat: [ds-reasoner]

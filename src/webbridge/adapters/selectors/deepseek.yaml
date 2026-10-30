@@ -1,0 +1,59 @@
+version: 1
+
+# Индикаторы состояния
+logged_in_indicator:
+  - 'textarea#chat-input'
+  - 'div[contenteditable][role="textbox"]'
+login_page_indicator:
+  - 'input[type="password"]'
+  - 'button:has-text("Log in")'
+captcha_indicator:
+  - 'iframe[src*="captcha"]'
+  - 'text=/verify you are human/i'
+rate_limit_banner:
+  - 'text=/limit|try again|usage cap|too many requests/i'
+
+# Чат
+new_chat_button:
+  - 'role=button[name="New chat"]'
+  - 'a[href="/"]'
+input:
+  - '#chat-input'
+  - 'textarea[placeholder*="Send a message"]'
+  - 'textarea[data-testid="chat-input"]'
+  - 'div[contenteditable][role="textbox"]'
+  - 'textarea'
+send_button:
+  - 'role=button[name="Send"]'
+  - 'button[data-testid="send"]'
+  - 'button[aria-label="Send"]'
+stop_button:
+  - 'role=button[name="Stop"]'
+  - 'button[aria-label="Stop"]'
+
+# Сообщения
+user_message:
+  - '[data-message-author-role="user"]'
+  - '.user-message'
+  - '[class*="UserMessage"]'
+  - '[data-testid="user-message"]'
+assistant_message:
+  - '[data-message-author-role="assistant"]'
+  - '.assistant-message'
+  - '[class*="AssistantMessage"]'
+  - '[data-testid="assistant-message"]'
+copy_button_in_message:
+  - 'role=button[name="Copy"]'
+  - 'button[aria-label="Copy"]'
+
+# Файлы
+file_input:
+  - 'input[type="file"]'
+
+# Выбор модели (если доступен в UI)
+model_picker_open:
+  - '[data-testid="model-selector"]'
+  - 'button:has-text("DeepSeek")'
+model_picker_option:
+  - 'role=option[name="{model}"]'
+  - 'text="{model}"'
