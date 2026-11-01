@@ -1,4 +1,5 @@
 """Запуск fake_site через uvicorn в фоновом потоке."""
+
 from __future__ import annotations
 
 import socket
@@ -25,10 +26,8 @@ class FakeSite:
         self._server: uvicorn.Server | None = None
         self._thread: threading.Thread | None = None
 
-    def __enter__(self) -> "FakeSite":
-        config = uvicorn.Config(
-            self._app, host="127.0.0.1", port=self.port, log_level="warning"
-        )
+    def __enter__(self) -> FakeSite:
+        config = uvicorn.Config(self._app, host="127.0.0.1", port=self.port, log_level="warning")
         self._server = uvicorn.Server(config)
         self._thread = threading.Thread(target=self._server.run, daemon=True)
         self._thread.start()

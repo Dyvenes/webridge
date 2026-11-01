@@ -1,4 +1,5 @@
 """Тесты браузерного адаптера на фейковом сайте."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -108,3 +109,52 @@ async def test_multiturn(adapter_env):
     r2 = await adapter.wait_done(handle, timeout_s=10.0, stable_s=0.3)
     assert "second" in r2.text
     assert r2.text != r1.text
+
+
+@pytest.mark.asyncio
+async def test_new_chat_uses_default_page_key(adapter_env):
+    adapter, _, _ = adapter_env
+    handle = await adapter.new_chat()
+    assert handle.page_key == "default"
+    assert handle.meta["page"] is await adapter._session.get_page()
+
+
+@pytest.mark.asyncio
+async def test_parallel_page_keys_are_independent(adapter_env):
+    adapter, _, _ = adapter_env
+    h1 = await adapter.new_chat(page_key="session-a")
+    h2 = await adapter.new_chat(page_key="session-b")
+
+    page1 = h1.meta["page"]
+    page2 = h2.meta["page"]
+    assert h1.page_key == "session-a"
+    assert h2.page_key == "session-b"
+    assert page1 is not page2
+
+    await adapter.send(h1, "alpha")
+    r1 = await adapter.wait_done(h1, timeout_s=10.0, stable_s=0.3)
+    assert "alpha" in r1.text
+
+    # Вторая вкладка не должна получить сообщение первой.
+    count_b, text_b = await adapter._assistant_state(page2)
+    assert count_b == 0
+    assert text_b == ""
+
+    await adapter.send(h2, "beta")
+    r2 = await adapter.wait_done(h2, timeout_s=10.0, stable_s=0.3)
+    assert "beta" in r2.text
+    assert "alpha" not in r2.text
+
+
+@pytest.mark.asyncio
+async def test_stream_yields_text_deltas(adapter_env):
+    adapter, _, _ = adapter_env
+    handle = await adapter.new_chat()
+    handle.meta["generation_timeout_s"] = 10.0
+
+    await adapter.send(handle, "streaming")
+    parts: list[str] = []
+    async for delta in adapter.stream(handle):
+        parts.append(delta)
+
+    assert "streaming" in "".join(parts)

@@ -1,0 +1,71 @@
+version: 1
+
+# Универсальный набор: совместим с тестовым fake_site и простыми чатами.
+logged_in_indicator:
+  - '[data-testid="sidebar"]'
+  - '#input'
+  - 'textarea'
+login_page_indicator:
+  - 'input[type="password"]'
+  - 'input[name="email"]'
+captcha_indicator:
+  - 'text=/verify you are human/i'
+  - 'text=/checking your browser/i'
+  - 'iframe[src*="captcha"]'
+rate_limit_banner:
+  - 'text=/limit|try again|usage cap|too many requests/i'
+  - 'text=/message limit|usage limit|try again later|out of messages/i'
+
+# Чат
+new_chat_button:
+  - 'role=link[name="New chat"]'
+  - 'a[href="/"]'
+  - 'a:has-text("New chat")'
+  - 'button[aria-label="New chat"]'
+input:
+  - '#input'
+  - 'textarea[placeholder*="Type"]'
+  - 'textarea'
+  - 'div[contenteditable="true"]'
+send_button:
+  - '#send'
+  - 'role=button[name="Send"]'
+  - 'button[aria-label="Send"]'
+stop_button:
+  - '#stop'
+  - 'role=button[name="Stop"]'
+  - 'button[aria-label="Stop"]'
+
+# Сообщения
+user_message:
+  - '[data-message-author="user"]'
+  - '[data-message-author-role="user"]'
+  - '[data-testid="user-message"]'
+assistant_message:
+  - '[data-message-author="assistant"]'
+  - '[data-message-author-role="assistant"]'
+  - '[data-testid="assistant-message"]'
+  - '.assistant-message'
+assistant_message_content:
+  - '.assistant-content'
+copy_button_in_message:
+  - 'role=button[name="Copy"]'
+  - 'button[aria-label="Copy"]'
+
+# Файлы
+file_input:
+  - 'input[type="file"]'
+
+# Выбор модели
+model_picker_open:
+  - '[data-testid="model-selector"]'
+  - 'button[aria-label*="model" i]'
+model_picker_option:
+  - '[role="option"]:has-text("{model}")'
+  - '[role="menuitem"]:has-text("{model}")'
+  - 'text="{model}"'
+
+chat_container:
+  - '#messages'
+  - 'main'
+  - '[data-testid="conversation"]'

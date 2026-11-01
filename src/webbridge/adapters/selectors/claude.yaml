@@ -1,0 +1,67 @@
+version: 1
+
+# Индикаторы состояния
+logged_in_indicator:
+  - 'div[contenteditable="true"]'
+  - 'fieldset'
+  - 'button[aria-label="Send message"]'
+login_page_indicator:
+  - 'input[name="email"]'
+  - 'button:has-text("Continue with email")'
+captcha_indicator:
+  - 'iframe[src*="captcha"]'
+  - 'text=/verify you are human/i'
+  - 'text=/checking your browser/i'
+rate_limit_banner:
+  - 'text=/message limit|usage limit|try again later|out of messages/i'
+
+# Чат
+new_chat_button:
+  - 'a[href="/new"]'
+  - 'button[aria-label="New chat"]'
+  - 'a:has-text("New chat")'
+input:
+  - 'div[contenteditable="true"].ProseMirror'
+  - 'div[contenteditable="true"][data-placeholder]'
+  - 'div[contenteditable="true"]'
+  - 'textarea'
+send_button:
+  - 'button[aria-label="Send message"]'
+  - 'button[aria-label="Send Message"]'
+  - 'button[data-testid="send-button"]'
+stop_button:
+  - 'button[aria-label="Stop response"]'
+  - 'button[aria-label="Stop Response"]'
+  - 'button[data-testid="stop-button"]'
+
+# Сообщения
+user_message:
+  - 'div[data-testid="user-message"]'
+  - '.font-user-message'
+  - '[data-message-author-role="user"]'
+assistant_message:
+  - 'div[data-testid="assistant-message"]'
+  - '.font-claude-message'
+  - '[data-message-author-role="assistant"]'
+  - 'div[data-is-streaming]'
+copy_button_in_message:
+  - 'button[aria-label="Copy"]'
+  - 'button[data-testid="copy-button"]'
+
+# Файлы
+file_input:
+  - 'input[type="file"]'
+
+# Выбор модели
+model_picker_open:
+  - 'button[data-testid="model-selector"]'
+  - 'button[aria-label*="model" i]'
+  - 'button:has-text("Claude")'
+model_picker_option:
+  - '[role="option"]:has-text("{model}")'
+  - '[role="menuitem"]:has-text("{model}")'
+  - 'text="{model}"'
+
+chat_container:
+  - 'main'
+  - '[data-testid="conversation"]'

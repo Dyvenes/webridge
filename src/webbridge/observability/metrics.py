@@ -1,4 +1,5 @@
 """Простые счётчики метрик (без внешних зависимостей)."""
+
 from __future__ import annotations
 
 from collections import defaultdict
@@ -11,6 +12,12 @@ class Metrics:
 
     def inc(self, name: str, value: float = 1.0) -> None:
         self._counters[name] += value
+
+    def dec(self, name: str, value: float = 1.0) -> None:
+        self._counters[name] -= value
+
+    def get(self, name: str) -> float:
+        return self._counters.get(name, 0.0)
 
     def set(self, name: str, value: float) -> None:
         self._gauges[name] = value

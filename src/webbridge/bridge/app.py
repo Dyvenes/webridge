@@ -1,332 +1,322 @@
-"""FastAPI-приложение моста (раздел 11)."""
+"""FastAPI-приложение WebBridge: OpenAI-совместимый локальный API.
+
+Единственный клиент — opencode. Приложение не содержит чат-интерфейса:
+оно принимает OpenAI-запрос, проигрывает его в веб-чате через Playwright
+и возвращает ответ в формате OpenAI, включая tool_calls.
+"""
+
 from __future__ import annotations
 
-import asyncio
 import time
-import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import AsyncIterator
+from typing import Any
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from webbridge.adapters.base import ChatHandle
-from webbridge.adapters.browser_base import BrowserChatAdapter
-from webbridge.config import AppConfig
-from webbridge.conversation.matcher import canonical_message, char_count, fingerprint, match
+from webbridge.bridge.auth import check_auth, save_token
+from webbridge.bridge.router import Router
+from webbridge.bridge.schemas import ChatCompletionRequest, Model, ModelList
+from webbridge.bridge.service import ConversationService
+from webbridge.config import AppConfig, ensure_home
 from webbridge.conversation.store import Store
 from webbridge.errors import (
     CaptchaRequired,
+    ChatLost,
+    ConfigError,
     GenerationTimeout,
     MessageTooLong,
+    ModelNotFound,
+    ModelUnavailable,
     NeedsLogin,
     ProtocolError,
     RateLimited,
+    RequestConflict,
     SelectorBroken,
+    SessionBusy,
+    UnsupportedContent,
     WebBridgeError,
 )
 from webbridge.limits.budget import BudgetManager
-from webbridge.observability.logging import configure as configure_logging, get_logger
+from webbridge.observability.logging import configure as configure_logging
+from webbridge.observability.logging import get_logger
 from webbridge.observability.metrics import Metrics
-from webbridge.protocol.render import render_delta, render_initial
-from webbridge.session.manager import SessionManager
 
-from .auth import check_auth
-from .router import Router
-from .schemas import (
-    AssistantMessage,
-    ChatCompletionRequest,
-    ChatCompletionResponse,
-    Choice,
-    ErrorBody,
-    ErrorResponse,
-    Model,
-    ModelList,
-    Usage,
-)
-from .streaming import chunk_bytes, stream_text
+log = get_logger("app")
 
-log = get_logger("bridge")
-metrics = Metrics()
-
-_DEFAULT_STORE = Path.home() / ".webbridge" / "state.db"
+_STATUS: dict[type[Exception], tuple[int, str]] = {
+    NeedsLogin: (503, "session_unavailable"),
+    CaptchaRequired: (503, "session_unavailable"),
+    SelectorBroken: (503, "service_unavailable"),
+    ModelUnavailable: (503, "model_unavailable"),
+    RateLimited: (429, "rate_limit_exceeded"),
+    ModelNotFound: (404, "model_not_found"),
+    MessageTooLong: (400, "invalid_request_error"),
+    UnsupportedContent: (400, "invalid_request_error"),
+    SessionBusy: (409, "session_busy"),
+    RequestConflict: (409, "request_conflict"),
+    ChatLost: (502, "chat_lost"),
+    GenerationTimeout: (504, "timeout"),
+    ProtocolError: (502, "bad_model_output"),
+    ConfigError: (500, "server_error"),
+}
 
 
-def _err(status: int, etype: str, msg: str, headers: dict | None = None) -> JSONResponse:
-    body = ErrorResponse(error=ErrorBody(type=etype, message=msg)).model_dump()
-    return JSONResponse(content=body, status_code=status, headers=headers)
+def error_payload(
+    message: str,
+    type_: str = "server_error",
+    *,
+    code: str | None = None,
+    param: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "error": {
+            "message": message,
+            "type": type_,
+            "param": param,
+            "code": code,
+        }
+    }
 
 
-def _map_error(e: Exception) -> JSONResponse:
-    if isinstance(e, (NeedsLogin, CaptchaRequired)):
-        return _err(503, "session_unavailable", str(e) or type(e).__name__)
-    if isinstance(e, RateLimited):
-        headers: dict[str, str] = {}
-        reset = getattr(e, "reset_at", None)
-        if isinstance(reset, datetime):
-            delta = (reset - datetime.now(timezone.utc)).total_seconds()
-            headers["Retry-After"] = str(max(1, int(delta)))
-        return _err(429, "rate_limit_exceeded", str(e), headers)
-    if isinstance(e, GenerationTimeout):
-        return _err(504, "timeout", str(e) or "generation timeout")
-    if isinstance(e, ProtocolError):
-        return _err(502, "bad_model_output", str(e))
-    if isinstance(e, SelectorBroken):
-        return _err(503, "adapter_broken", str(e))
-    if isinstance(e, MessageTooLong):
-        return _err(400, "invalid_request_error", str(e))
-    if isinstance(e, WebBridgeError):
-        return _err(500, "server_error", str(e))
-    return _err(500, "server_error", str(e) or type(e).__name__)
+def status_for(exc: Exception) -> tuple[int, str]:
+    for cls, result in _STATUS.items():
+        if isinstance(exc, cls):
+            return result
+    return 500, "server_error"
 
 
-def _estimate_tokens(text: str | None) -> int:
-    return max(1, int(len(text or "") / 3.5))
-
-
-async def _persist_reply(
-    store: Store,
-    chat_id: str,
-    incoming_messages: list,
-    reply_text: str,
-    handle: ChatHandle,
-) -> None:
-    reply_canon = canonical_message({"role": "assistant", "content": reply_text})
-    stored = await store.get_chat_messages(chat_id)
-    new_all_canon = stored + [reply_canon]
-    new_fp = fingerprint([{"role": "assistant", "content": reply_text}])  # overwritten below
-    # Build a deterministic fingerprint over ALL canonical strings
-    import hashlib
-    h = hashlib.sha256()
-    for c in new_all_canon:
-        h.update(c.encode("utf-8"))
-        h.update(b"\n")
-    new_fp = h.hexdigest()
-    new_cc = sum(len(c) for c in new_all_canon)
-    await store.append_chat_messages(chat_id, [reply_canon], new_fp, new_cc)
-    if handle.chat_url:
-        await store.update_chat_url(chat_id, handle.chat_url)
-
-
-def create_app(config: AppConfig, store_path: Path | None = None) -> FastAPI:
-    store = Store(store_path or _DEFAULT_STORE)
-    session_mgr = SessionManager()
-    adapters: dict[str, BrowserChatAdapter] = {}
-    for svc_name, svc in config.services.items():
+def _service_for_model(config: AppConfig, model: str) -> str:
+    for name, svc in config.services.items():
         if not svc.enabled:
             continue
-        session = session_mgr.get(svc_name, svc)
-        adapters[svc_name] = BrowserChatAdapter(svc_name, svc, session, config.humanize)
-    router = Router(config, adapters)
-    budget = BudgetManager(store)
+        if model in svc.models:
+            return name
+        for sep in (":", "/"):
+            if sep in model and model.split(sep, 1)[0] == name:
+                return name
+    return "webbridge"
+
+
+def create_app(
+    config: AppConfig | None = None,
+    *,
+    config_path: Path | None = None,
+    adapters: dict[str, Any] | None = None,
+    store: Store | None = None,
+    store_path: Path | None = None,
+    api_token: str | None = None,
+) -> FastAPI:
+    """Создаёт приложение.
+
+    Параметры с значениями по умолчанию нужны для тестов и встраивания:
+    можно передать готовый конфиг, fake-адаптеры и Store.
+    """
 
     @asynccontextmanager
-    async def lifespan(_app: FastAPI):
-        await store.connect()
-        log.info("bridge_started", services=list(adapters.keys()))
+    async def lifespan(app: FastAPI):
+        configure_logging()
+        if config is None:
+            ensure_home()
+
+        cfg = config or AppConfig.load(config_path)
+        app.state.config = cfg
+        app.state.api_token = api_token or save_token()
+        app.state.metrics = Metrics()
+
+        owns_store = store is None
+        st = store or Store(store_path or cfg.bridge.db_path)
+        if owns_store:
+            await st.connect()
+        app.state.store = st
+
+        owns_adapters = adapters is None
+        adapter_map: dict[str, Any] = dict(adapters or {})
+        if owns_adapters:
+            from webbridge.adapters.factory import create_adapter
+            from webbridge.session.manager import SessionManager
+
+            manager = SessionManager()
+            for name, svc in cfg.services.items():
+                if not svc.enabled:
+                    continue
+                session = manager.get(name, svc)
+                adapter_map[name] = create_adapter(name, svc, session, cfg.humanize)
+
+        router = Router(cfg, adapter_map)
+        budget = BudgetManager(st)
+        app.state.adapters = adapter_map
+        app.state.router = router
+        app.state.budget = budget
+        app.state.service = ConversationService(cfg, st, router, budget)
+        log.info(
+            "bridge_started",
+            host=cfg.bridge.host,
+            port=cfg.bridge.port,
+            services=sorted(adapter_map),
+            models=router.list_models(),
+        )
         try:
             yield
         finally:
-            await session_mgr.close_all()
-            await store.close()
-            log.info("bridge_stopped")
+            for adapter in adapter_map.values():
+                try:
+                    await adapter.close()
+                except Exception as exc:  # noqa: BLE001 - shutdown не должен падать
+                    log.warning("adapter_close_failed", error=str(exc))
+            if owns_store:
+                await st.close()
 
-    app = FastAPI(title="WebBridge", lifespan=lifespan)
-    app.state.config = config
-    app.state.store = store
-    app.state.router = router
-    app.state.budget = budget
+    app = FastAPI(
+        title="WebBridge",
+        version="0.2.0",
+        docs_url="/docs" if (config and config.bridge.enable_docs) else None,
+        redoc_url=None,
+        openapi_url="/openapi.json" if (config and config.bridge.enable_docs) else None,
+        lifespan=lifespan,
+    )
 
+    @app.middleware("http")
+    async def _metrics_middleware(request: Request, call_next):
+        started = time.monotonic()
+        metrics: Metrics | None = getattr(request.app.state, "metrics", None)
+        if metrics is not None:
+            metrics.inc("webbridge_active_requests")
+        try:
+            response = await call_next(request)
+        except Exception:
+            if metrics is not None:
+                metrics.inc("webbridge_http_errors_total")
+            raise
+        finally:
+            if metrics is not None:
+                metrics.dec("webbridge_active_requests")
+                metrics.inc("webbridge_http_requests_total")
+                metrics.inc(
+                    "webbridge_http_duration_seconds_sum",
+                    time.monotonic() - started,
+                )
+        if metrics is not None:
+            metrics.inc(f"webbridge_http_status_{response.status_code}_total")
+        return response
+
+    # --- error handlers -------------------------------------------------
+    @app.exception_handler(WebBridgeError)
+    async def _webbridge_error(_: Request, exc: WebBridgeError):
+        status, type_ = status_for(exc)
+        if status >= 500:
+            log.error(
+                "request_failed",
+                error=str(exc),
+                error_type=type(exc).__name__,
+                status=status,
+            )
+        headers = {"Retry-After": "5"} if status in (409, 429) else None
+        return JSONResponse(
+            status_code=status,
+            content=error_payload(str(exc), type_, code=type(exc).__name__),
+            headers=headers,
+        )
+
+    @app.exception_handler(HTTPException)
+    async def _http_error(_: Request, exc: HTTPException):
+        if exc.status_code == 401:
+            type_ = "authentication_error"
+        elif exc.status_code < 500:
+            type_ = "invalid_request_error"
+        else:
+            type_ = "server_error"
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=error_payload(str(exc.detail), type_, code=str(exc.status_code)),
+            headers=getattr(exc, "headers", None),
+        )
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error(_: Request, exc: RequestValidationError):
+        payload = error_payload(
+            "invalid request body",
+            "invalid_request_error",
+            code="validation_error",
+            param="body",
+        )
+        payload["error"]["details"] = exc.errors()
+        return JSONResponse(status_code=400, content=payload)
+
+    @app.exception_handler(Exception)
+    async def _unhandled_error(_: Request, exc: Exception):
+        log.error(
+            "unhandled_exception",
+            error=str(exc),
+            error_type=type(exc).__name__,
+        )
+        return JSONResponse(
+            status_code=500,
+            content=error_payload(
+                "internal server error",
+                "server_error",
+                code=type(exc).__name__,
+            ),
+        )
+
+    # --- endpoints ------------------------------------------------------
     @app.get("/healthz")
-    async def healthz():
-        return {"status": "ok", "services": list(adapters.keys())}
+    async def healthz(request: Request):
+        return {
+            "status": "ok",
+            "version": "0.2.0",
+            "services": sorted(getattr(request.app.state, "adapters", {})),
+        }
 
-    @app.get("/metrics")
-    async def prom_metrics():
-        return Response(metrics.render_prometheus(), media_type="text/plain; version=0.0.4")
+    @app.get("/metrics", dependencies=[Depends(check_auth)])
+    async def metrics(request: Request) -> Response:
+        data = request.app.state.metrics.render_prometheus()
+        return Response(content=data, media_type="text/plain; version=0.0.4")
 
     @app.get("/v1/models", dependencies=[Depends(check_auth)])
-    async def list_models():
-        return ModelList(data=[Model(id=m) for m in router.list_models()])
-
-    @app.get("/admin/sessions", dependencies=[Depends(check_auth)])
-    async def admin_sessions():
-        result = {}
-        for name in adapters:
-            svc = config.services[name]
-            result[name] = await budget.status(name, svc.limits)
-        return {"services": result}
-
-    @app.post("/admin/chats/{chat_id}/reset", dependencies=[Depends(check_auth)])
-    async def admin_reset(chat_id: str):
-        await store.close_chat(chat_id)
-        return {"ok": True, "chat_id": chat_id}
-
-    # ------------------------------------------------------------------
-    async def _prepare(req: ChatCompletionRequest):
-        adapter, service_name, service_model = router.route(req.model)
-        svc_cfg = config.services[service_name]
-        await budget.check(service_name, svc_cfg.limits)
-
-        status = await adapter.ensure_session()
-        if status != "OK":
-            if status == "NEEDS_LOGIN":
-                raise NeedsLogin(service_name)
-            if status == "CAPTCHA":
-                raise CaptchaRequired(service_name)
-            if status == "RATE_LIMITED":
-                raise RateLimited(service_name)
-            raise SelectorBroken("logged_in_indicator", service_name)
-
-        kind, chat_row, delta = await match(store, service_name, req.messages)
-
-        if kind == "new":
-            handle = await adapter.new_chat(service_model)
-            text = render_initial(req.messages, req.tools)
-            init_canon = [canonical_message(m) for m in req.messages]
-            import hashlib
-            h = hashlib.sha256()
-            for c in init_canon:
-                h.update(c.encode("utf-8"))
-                h.update(b"\n")
-            init_fp = h.hexdigest()
-            init_cc = sum(len(c) for c in init_canon)
-            chat_id = await store.create_chat(
-                service_name, handle.chat_url, service_model,
-                init_fp, len(init_canon), init_cc,
-            )
-            await store.store_chat_messages(chat_id, init_canon, init_fp, init_cc)
-        else:
-            assert chat_row is not None
-            chat_id = chat_row["id"]
-            if chat_row.get("chat_url"):
-                handle = await adapter.open_chat(chat_row["chat_url"])
-            else:
-                handle = ChatHandle(service=service_name, model=service_model)
-            text = render_delta(delta)
-
-        if len(text) > svc_cfg.limits.max_message_chars:
-            raise MessageTooLong(svc_cfg.limits.max_message_chars, len(text))
-
-        return adapter, service_name, service_model, svc_cfg, chat_id, handle, text
-
-    async def _run_once(
-        adapter, svc_cfg, handle: ChatHandle, text: str, chat_id: str, req: ChatCompletionRequest
-    ):
-        await adapter.send(handle, text)
-        reply = await adapter.wait_done(handle, svc_cfg.limits.max_generation_s if hasattr(svc_cfg.limits, "max_generation_s") else 300.0)
-        await _persist_reply(store, chat_id, req.messages, reply.text, handle)
-        return reply
+    async def list_models(request: Request) -> ModelList:
+        cfg: AppConfig = request.app.state.config
+        router: Router = request.app.state.router
+        return ModelList(
+            data=[
+                Model(id=alias, owned_by=_service_for_model(cfg, alias))
+                for alias in router.list_models()
+            ]
+        )
 
     @app.post("/v1/chat/completions", dependencies=[Depends(check_auth)])
-    async def chat_completions(req: ChatCompletionRequest):
-        started = time.monotonic()
-        request_id = f"req_{uuid.uuid4().hex[:12]}"
+    async def chat_completions(req: ChatCompletionRequest, request: Request):
+        service: ConversationService = request.app.state.service
+        headers = {k.lower(): v for k, v in request.headers.items()}
+
+        turn = await service.begin(req, headers)
+        if req.stream:
+            return StreamingResponse(
+                turn.stream_sse(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
         try:
-            adapter, service_name, service_model, svc_cfg, chat_id, handle, text = await _prepare(req)
-
-            if req.stream:
-                return StreamingResponse(
-                    _stream_generator(
-                        req, adapter, svc_cfg, handle, text, chat_id, service_name, request_id
-                    ),
-                    media_type="text/event-stream",
-                )
-
-            await budget.consume(service_name)
-            reply = await _run_once(adapter, svc_cfg, handle, text, chat_id, req)
-            duration_ms = int((time.monotonic() - started) * 1000)
-            await store.log_request(
-                service_name, chat_id, 1,
-                datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                duration_ms, "ok" if reply.finished else "timeout",
-            )
-            metrics.inc("requests_total")
-            metrics.inc(f"requests_{service_name}_total")
-
-            prompt_tokens = _estimate_tokens(text)
-            completion_tokens = _estimate_tokens(reply.text)
-            return ChatCompletionResponse(
-                model=req.model,
-                choices=[
-                    Choice(
-                        message=AssistantMessage(content=reply.text),
-                        finish_reason="stop",
-                    )
-                ],
-                usage=Usage(
-                    prompt_tokens=prompt_tokens,
-                    completion_tokens=completion_tokens,
-                    total_tokens=prompt_tokens + completion_tokens,
-                ),
-            )
-        except Exception as e:
-            duration_ms = int((time.monotonic() - started) * 1000)
-            log.error("chat_completions_failed", request_id=request_id,
-                      error=str(e), error_type=type(e).__name__)
-            metrics.inc("errors_total")
-            metrics.inc(f"errors_{type(e).__name__}_total")
-            return _map_error(e)
-
-    async def _stream_generator(
-        req, adapter, svc_cfg, handle, text, chat_id, service_name, request_id
-    ) -> AsyncIterator[bytes]:
-        response_id = f"chatcmpl-{uuid.uuid4().hex[:16]}"
-        started = time.monotonic()
-        try:
-            await budget.consume(service_name)
-            await adapter.send(handle, text)
-            timeout = getattr(svc_cfg.limits, "max_generation_s", 300.0) or 300.0
-            wait_task = asyncio.create_task(adapter.wait_done(handle, timeout))
-
-            yield chunk_bytes(response_id, req.model, {"role": "assistant"})
-            while True:
-                done, _ = await asyncio.wait({wait_task}, timeout=10)
-                if wait_task in done:
-                    break
-                yield b": keep-alive\n\n"
-
-            reply = wait_task.result()
-            await _persist_reply(store, chat_id, req.messages, reply.text, handle)
-            if reply.text:
-                yield chunk_bytes(response_id, req.model, {"content": reply.text})
-            yield chunk_bytes(response_id, req.model, {}, finish="stop")
-
-            duration_ms = int((time.monotonic() - started) * 1000)
-            await store.log_request(
-                service_name, chat_id, 1,
-                datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                duration_ms, "ok" if reply.finished else "timeout",
-            )
-            metrics.inc("requests_total")
-            metrics.inc(f"requests_{service_name}_total")
-        except Exception as e:
-            log.error("stream_failed", request_id=request_id,
-                      error=str(e), error_type=type(e).__name__)
-            metrics.inc("errors_total")
-            yield chunk_bytes(
-                response_id, req.model,
-                {"content": f"\n[error: {type(e).__name__}: {e}]"},
-                finish="stop",
-            )
+            await turn.complete()
+            return turn.response()
         finally:
-            yield b"data: [DONE]\n\n"
+            await turn.aclose()
+
+    @app.post("/admin/sessions/{session_id}/reset", dependencies=[Depends(check_auth)])
+    async def reset_session(session_id: str, request: Request):
+        service: ConversationService = request.app.state.service
+        await service.reset_session(session_id)
+        return {"ok": True, "session_id": session_id}
 
     return app
 
 
-def run(config: AppConfig) -> None:
-    """Запустить мост через uvicorn."""
-    import uvicorn
-
-    configure_logging()
-    app = create_app(config)
-    uvicorn.run(
-        app,
-        host=config.bridge.host,
-        port=config.bridge.port,
-        log_level="info",
-        access_log=False,
-    )
+# Для `uvicorn webbridge.bridge.app:app` и обратной совместимости.
+app = create_app()

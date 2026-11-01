@@ -1,4 +1,5 @@
 """Тесты слоя сессий на фейковом сайте."""
+
 from __future__ import annotations
 
 from pathlib import Path

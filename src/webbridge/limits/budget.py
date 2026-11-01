@@ -1,7 +1,8 @@
 """Часовые и суточные бюджеты (раздел 8.8)."""
+
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from webbridge.config import LimitsConfig
 from webbridge.conversation.store import Store
@@ -9,11 +10,11 @@ from webbridge.errors import RateLimited
 
 
 def _hour_start() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:00:00Z")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:00:00Z")
 
 
 def _day_start() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT00:00:00Z")
+    return datetime.now(UTC).strftime("%Y-%m-%dT00:00:00Z")
 
 
 class BudgetManager:

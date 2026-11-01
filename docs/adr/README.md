@@ -6,7 +6,9 @@
 ## Шаблон
 
 \`\`\`markdown
-# ADR NNNN: <Title>
+# ADR
+
+- [0004: Только opencode, только API](0004-opencode-only.md) NNNN: <Title>
 
 - **Статус:** proposed | accepted | deprecated | superseded by ADR-XXXX
 - **Дата:** YYYY-MM-DD

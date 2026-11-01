@@ -1,10 +1,9 @@
 """Интерактивный вход (раздел 7.2)."""
+
 from __future__ import annotations
 
 import asyncio
 import time
-
-import yaml
 
 from webbridge.config import ServiceConfig
 from webbridge.observability.logging import get_logger
@@ -12,8 +11,7 @@ from webbridge.observability.logging import get_logger
 log = get_logger("login")
 
 
-async def interactive_login(service_name: str, config: ServiceConfig,
-                            timeout_s: int = 600) -> bool:
+async def interactive_login(service_name: str, config: ServiceConfig, timeout_s: int = 600) -> bool:
     from webbridge.config import load_selectors
     from webbridge.session.manager import BrowserSession
 

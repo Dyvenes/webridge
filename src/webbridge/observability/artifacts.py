@@ -1,4 +1,5 @@
 """Сохранение артефактов при сбоях (раздел 8.2)."""
+
 from __future__ import annotations
 
 import json

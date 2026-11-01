@@ -1,11 +1,9 @@
 bridge:
   host: 127.0.0.1
   port: 8000
-  api_token_ref: keyring:webbridge/api_token
-
-workspace:
-  root: ~/projects/current
-  dangerous_commands: confirm
+  api_token_ref: file:~/.webbridge/api_token
+  db_path: ~/.webbridge/state.sqlite3
+  enable_docs: false
 
 humanize:
   min_delay_s: 1.2
@@ -15,26 +13,47 @@ humanize:
 
 services:
   deepseek:
+    type: deepseek
     enabled: true
     base_url: https://chat.deepseek.com/
     profile_dir: ~/.webbridge/profiles/deepseek
+    selectors_file: ~/.webbridge/selectors/deepseek.yaml
     browser:
       channel: chrome
       headless: false
-    selectors_file: ~/.webbridge/selectors/deepseek.yaml
     models:
-      ds-chat: "DeepSeek"
-      ds-reasoner: "DeepSeek-R1"
+      deepseek-chat: DeepSeek
+      deepseek-reasoner: DeepSeek-R1
+    context_window: 64000
+    max_output_tokens: 8192
     limits:
       max_message_chars: 50000
       max_requests_per_hour: 25
       max_requests_per_day: 200
       max_parallel_chats: 1
-    tier2:
-      enabled: false
-    protocol_format: xml
+      max_generation_s: 300
+
+  claude:
+    type: claude
+    enabled: true
+    base_url: https://claude.ai/new
+    profile_dir: ~/.webbridge/profiles/claude
+    selectors_file: ~/.webbridge/selectors/claude.yaml
+    browser:
+      channel: chrome
+      headless: false
+    models:
+      claude-sonnet: Claude Sonnet 4.5
+      claude-opus: Claude Opus 4.5
+    context_window: 200000
+    max_output_tokens: 8192
+    limits:
+      max_message_chars: 100000
+      max_requests_per_hour: 25
+      max_requests_per_day: 200
+      max_parallel_chats: 1
+      max_generation_s: 300
 
 routing:
-  default_model: ds-chat
-  fallbacks:
-    ds-chat: [ds-reasoner]
+  default_model: deepseek-chat
+  fallbacks: {}

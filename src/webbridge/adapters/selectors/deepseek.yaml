@@ -3,33 +3,50 @@ version: 1
 # Индикаторы состояния
 logged_in_indicator:
   - 'textarea#chat-input'
+  - 'div[contenteditable="true"][role="textbox"]'
   - 'div[contenteditable][role="textbox"]'
+  - '#chat-input'
+  - 'div[contenteditable="true"]'
 login_page_indicator:
   - 'input[type="password"]'
   - 'button:has-text("Log in")'
+  - 'button:has-text("Log in or sign up")'
 captcha_indicator:
   - 'iframe[src*="captcha"]'
   - 'text=/verify you are human/i'
+  - 'text=/checking your browser/i'
 rate_limit_banner:
-  - 'text=/limit|try again|usage cap|too many requests/i'
+  - 'text=/message limit|usage limit|try again later|out of messages/i'
+  - 'text=/too many requests/i'
 
 # Чат
 new_chat_button:
   - 'role=button[name="New chat"]'
+  - 'button[aria-label="New chat"]'
+  - 'button[aria-label="New Chat"]'
   - 'a[href="/"]'
+  - 'a:has-text("New chat")'
 input:
   - '#chat-input'
+  - 'textarea#chat-input'
   - 'textarea[placeholder*="Send a message"]'
   - 'textarea[data-testid="chat-input"]'
+  - 'div[contenteditable="true"][role="textbox"]'
   - 'div[contenteditable][role="textbox"]'
+  - 'div[contenteditable="true"]'
   - 'textarea'
 send_button:
   - 'role=button[name="Send"]'
   - 'button[data-testid="send"]'
   - 'button[aria-label="Send"]'
+  - 'button[aria-label="Send message"]'
+  - 'button[type="submit"]'
 stop_button:
   - 'role=button[name="Stop"]'
   - 'button[aria-label="Stop"]'
+  - 'button[aria-label="Stop generating"]'
+  - 'button[aria-label="Stop response"]'
+  - 'button[data-testid="stop"]'
 
 # Сообщения
 user_message:
@@ -42,9 +59,13 @@ assistant_message:
   - '.assistant-message'
   - '[class*="AssistantMessage"]'
   - '[data-testid="assistant-message"]'
+  - '.ds-markdown'
+assistant_message_content:
+  - '.ds-markdown'
 copy_button_in_message:
   - 'role=button[name="Copy"]'
   - 'button[aria-label="Copy"]'
+  - 'button[data-testid="copy"]'
 
 # Файлы
 file_input:
@@ -54,6 +75,14 @@ file_input:
 model_picker_open:
   - '[data-testid="model-selector"]'
   - 'button:has-text("DeepSeek")'
+  - 'button[aria-label*="model" i]'
 model_picker_option:
   - 'role=option[name="{model}"]'
+  - '[role="option"]:has-text("{model}")'
+  - '[role="menuitem"]:has-text("{model}")'
   - 'text="{model}"'
+
+chat_container:
+  - 'main'
+  - '[class*="chat-container"]'
+  - '[class*="ChatContainer"]'

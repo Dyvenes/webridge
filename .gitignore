@@ -1,6 +1,6 @@
 .venv/
 __pycache__/
-*.pyc
+*.py[cod]
 *.egg-info/
 dist/
 build/
@@ -9,8 +9,12 @@ build/
 .ruff_cache/
 *.db
 *.sqlite
+*.sqlite3
 .webbridge/
+profiles/
 artifacts/
 har/
-.venv/Lib
-.idea
+tmp/
+*.log
+.env
+.idea/

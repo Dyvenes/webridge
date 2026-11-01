@@ -17,10 +17,19 @@ dependencies = [
     "typer>=0.12",
     "keyring>=25.5",
     "jsonschema>=4.23",
+    "beautifulsoup4>=4.12",
+    "markdownify>=0.13",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "hypothesis>=6.115", "python-multipart>=0.0.9"]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "hypothesis>=6.115",
+    "python-multipart>=0.0.9",
+    "ruff>=0.8",
+    "mypy>=1.13",
+]
 
 [project.scripts]
 webbridge = "webbridge.cli:app"
@@ -34,4 +43,18 @@ packages = ["src/webbridge"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_unused_ignores = false
+ignore_missing_imports = true

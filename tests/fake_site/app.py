@@ -1,4 +1,5 @@
 """Минимальный FastAPI-сайт: логин, чат, капча, лимит."""
+
 from __future__ import annotations
 
 from fastapi import Cookie, FastAPI, Form
