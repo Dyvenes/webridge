@@ -45,31 +45,35 @@ def _keyring_set(token: str) -> None:
         log.warning("keyring_unavailable_using_file")
 
 
+def _file_token() -> str | None:
+    path = token_path()
+    if not path.exists():
+        return None
+    try:
+        return path.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
 def load_token() -> str | None:
     env = os.environ.get("WEBBRIDGE_API_TOKEN")
     if env:
         return env.strip() or None
 
-    token = _keyring_get()
+    # Файл — основной источник для внешних клиентов: плагин opencode читает
+    # именно его. Keyring остаётся запасным вариантом.
+    token = _file_token()
     if token:
         return token
-
-    path = token_path()
-    if path.exists():
-        try:
-            return path.read_text(encoding="utf-8").strip() or None
-        except OSError:
-            return None
-    return None
+    return _keyring_get()
 
 
 def save_token(token: str | None = None, force: bool = False) -> str:
-    if not force:
-        existing = load_token()
-        if existing:
-            return existing
+    if force:
+        token = token or secrets.token_urlsafe(32)
+    else:
+        token = token or load_token() or secrets.token_urlsafe(32)
 
-    token = token or secrets.token_urlsafe(32)
     _keyring_set(token)
     path = token_path()
     path.parent.mkdir(parents=True, exist_ok=True)

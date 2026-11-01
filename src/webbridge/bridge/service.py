@@ -347,6 +347,7 @@ class Turn:
         # Полный seed отправляется только в новый удалённый чат. Режим
         # нужен лишь для логов/диагностики: commit всегда пишет полную
         # историю, а не только дельту.
+        log.warning("start_new_chat_reason", reason=reason, session_id=self.session_id)
         self.mode = "reset" if self.session.get("history") else "new"
         self.handle = await self.adapter.new_chat(self.service_model, page_key=self.page_key)
         await self.service.store.update_session_chat(self.session_id, self.handle.chat_url)
@@ -585,6 +586,9 @@ class Turn:
 
             if self.handle is None:
                 raise WebBridgeError("turn has no chat handle")
+
+            if not self.sent:
+                await self.send()
 
             if self.tool_mode:
                 # Буферизуем ответ, чтобы не отправить клиенту текстовый

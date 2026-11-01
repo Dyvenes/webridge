@@ -14,7 +14,7 @@ from typing import Annotated
 
 import typer
 
-from webbridge.bridge.auth import load_token, save_token
+from webbridge.bridge.auth import save_token
 from webbridge.config import AppConfig, ensure_home
 from webbridge.errors import WebBridgeError
 from webbridge.observability.logging import configure as configure_logging
@@ -114,7 +114,7 @@ def token(
 ) -> None:
     """Показать (или перевыпустить) bearer-токен для opencode."""
     ensure_home()
-    value = save_token(force=True) if rotate else (load_token() or save_token())
+    value = save_token(force=rotate)
     typer.echo(value)
 
 

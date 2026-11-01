@@ -21,8 +21,6 @@ export default Plugin.define({
   id: "webbridge-session",
 
   async setup(ctx) {
-    const token = await readToken()
-
     await ctx.session.hook(
       "http.request",
       async (event) => {
@@ -39,6 +37,9 @@ export default Plugin.define({
           event.request.headers.set("X-WebBridge-Kind", "title")
         }
 
+        // Читаем токен на каждом запросе: файл может появиться после
+        // запуска opencode, а `webbridge token --rotate` меняет его.
+        const token = await readToken()
         if (token) {
           event.request.headers.set("Authorization", `Bearer ${token}`)
         }

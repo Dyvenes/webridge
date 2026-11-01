@@ -157,65 +157,47 @@ class BrowserChatAdapter:
         await self._ensure_base_page(page)
         return await self._session.check_health(page, self._selectors)
 
-    async def new_chat(self, model: str | None = None, page_key: str = "default") -> ChatHandle:
-        page = await self._session.get_page(page_key)
-        await self._ensure_base_page(page)
 
+    async def new_chat(self, model: str | None = None, page_key: str = "default") -> ChatHandle:
+        log.warning("TRYING TO CREATE NEW CHAT")
+        """Создаёт ChatHandle на отдельной странице браузера.
+
+        Новая вкладка автоматически открывает чистый чат DeepSeek.
+        Нажатие кнопки создания чата не требуется.
+        """
+        page = await self._session.get_page(page_key)
+        # Новый чат: вкладка должна стоять на чистой стартовой странице.
+        if page.url.rstrip("/") != self.config.base_url.rstrip("/"):
+            await page.goto(self.config.base_url, wait_until="domcontentloaded")
+
+        # Проверяем состояние авторизации и доступность сервиса.
+        log.warning("Проверяем состояние авторизации и доступность сервиса.")
         status = await self._session.check_health(page, self.selectors)
         self._raise_for_status(status)
 
-        before_url = page.url
-        clicked = False
+        log.warning("# Ждём появления поля ввода на уже открытом новом чате.")
         try:
-            btn = await self._find(page, "new_chat_button", timeout_ms=8000)
-            try:
-                await btn.click()
-                clicked = True
-            except Exception as e:
-                log.warning(
-                    "new_chat_click_failed",
-                    service=self.name,
-                    error=str(e),
-                )
+            await self._find(page, "input", timeout_ms=15000)
         except SelectorBroken as e:
-            log.warning(
-                "new_chat_button_missing_fallback_to_url",
-                service=self.name,
-                error=str(e),
-            )
+            raise ChatLost(
+                f"{self.name}: chat input not found after opening page: {e}"
+            ) from e
 
-        if not clicked:
-            # Новый чат = корневой URL сайта. Это надёжнее любого селектора.
-            await page.goto(self.config.base_url, wait_until="domcontentloaded")
-            await asyncio.sleep(0.3)
-
-        try:
-            await page.wait_for_load_state("domcontentloaded", timeout=3000)
-        except Exception:
-            pass
-
-        if not await self._wait_chat_changed(page, before_url):
-            # Кнопка могла не сработать — пробуем прямой переход на base_url.
-            log.warning(
-                "new_chat_not_confirmed_fallback_to_url",
-                service=self.name,
-                url=page.url,
-            )
-            await page.goto(self.config.base_url, wait_until="domcontentloaded")
-            if not await self._wait_chat_changed(page, before_url):
-                raise SelectorBroken(
-                    "new_chat_button",
-                    self.name,
-                    message=(
-                        "new chat was not confirmed: URL did not change "
-                        "and message list is not empty"
-                    ),
-                )
-
+        log.warning("# Выбираем модель, если она была явно указана.")
         if model:
             selected = await self._select_model(page, model)
             if not selected and self.config.strict_model:
-                raise ModelUnavailable(f"{self.name}: model {model!r} is not available in UI")
+                raise ModelUnavailable(
+                    f"{self.name}: model {model!r} is not available in UI"
+                )
+
+        log.info(
+            "new_chat_page_ready",
+            service=self.name,
+            page_key=page_key,
+            url=page.url,
+            model=model,
+        )
 
         return ChatHandle(
             service=self.name,
@@ -224,6 +206,7 @@ class BrowserChatAdapter:
             page_key=page_key,
             meta={"page": page},
         )
+
 
     async def _wait_chat_changed(self, page, before_url: str, timeout_s: float = 5.0) -> bool:
         deadline = time.monotonic() + timeout_s
@@ -246,7 +229,7 @@ class BrowserChatAdapter:
             raise ChatLost(f"{self.name}: chat input not found at {chat_url}: {e}") from e
 
         if not await self._has(page, "chat_container", timeout_ms=500):
-            log.debug(
+            log.warning(
                 "chat_container_not_found",
                 service=self.name,
                 url=page.url,
@@ -318,92 +301,129 @@ class BrowserChatAdapter:
             await page.goto(target, wait_until="domcontentloaded")
 
     async def send(self, chat: ChatHandle, text: str, files: Sequence[Path] = ()) -> None:
+        log.warning("send_start", service=self.name, text_len=len(text), files=len(files))
+
         if len(text) > self.config.limits.max_message_chars:
+            log.error("send_message_too_long", service=self.name,
+                      limit=self.config.limits.max_message_chars, actual=len(text))
             raise MessageTooLong(self.config.limits.max_message_chars, len(text))
 
+        log.warning("send_step_chat_page", service=self.name)
         page = self._chat_page(chat)
+
+        log.warning("send_step_ensure_chat_url", service=self.name)
         await self._ensure_chat_url(page, chat)
 
         if files:
+            log.warning("send_step_upload_files", service=self.name, count=len(files))
             await self._upload_files(page, files)
+            log.warning("send_step_upload_files_done", service=self.name)
 
+        log.warning("send_step_humanize_pre_send", service=self.name)
         await humanize.pre_send(self._humanize)
 
+        log.warning("send_step_find_input", service=self.name)
         inp = await self._find(page, "input")
+        log.warning("send_step_find_input_done", service=self.name)
 
-        # Запоминаем состояние переписки до отправки.
+        # Snapshot conversation state before sending.
+        log.warning("send_step_capture_state_before", service=self.name)
         assistant_count_before, assistant_text_before = await self._assistant_state(page)
         user_before = await self._message_count(page, "user_message")
+        log.warning("send_state_before_captured", service=self.name,
+                  assistant_count=assistant_count_before,
+                  user_count=user_before,
+                  assistant_text_len=len(assistant_text_before or ""))
 
         chat.meta["assistant_count_before"] = assistant_count_before
         chat.meta["assistant_text_before"] = assistant_text_before
         chat.meta["user_count_before"] = user_before
 
         try:
+            log.warning("send_step_click_input", service=self.name)
             await inp.click()
             if self._humanize.typing_mode == "type" and len(text) < 2000:
+                log.warning("send_step_typing_char_by_char", service=self.name, chars=len(text))
                 for ch in text:
                     await page.keyboard.type(ch)
                     await asyncio.sleep(0.03)
+                log.warning("send_step_typing_done", service=self.name)
             else:
+                log.warning("send_step_fill_input", service=self.name, mode="fill")
                 try:
                     await inp.fill(text)
-                except Exception:
+                    log.warning("send_step_fill_done", service=self.name)
+                except Exception as fill_err:
+                    log.warning("send_fill_failed_fallback_insert_text",
+                                service=self.name, error=str(fill_err))
                     await page.keyboard.insert_text(text)
+                    log.warning("send_step_insert_text_done", service=self.name)
         except Exception as e:
+            log.error("send_input_broken", service=self.name, error=str(e))
             raise SelectorBroken("input", self.name, message=str(e)) from e
 
-        # Отправка: кнопка, при её отсутствии — Enter.
+        # Send: try button first, fall back to Enter.
         sent = False
+        log.warning("send_step_find_send_button", service=self.name)
         try:
             send_btn = await self._find(page, "send_button", timeout_ms=2000)
             try:
+                log.warning("send_step_click_send_button", service=self.name)
                 await send_btn.click()
                 sent = True
+                log.warning("send_button_clicked", service=self.name)
             except Exception as e:
-                log.warning(
-                    "send_button_click_failed",
-                    service=self.name,
-                    error=str(e),
-                )
+                log.warning("send_button_click_failed", service=self.name, error=str(e))
         except SelectorBroken as e:
-            log.warning(
-                "send_button_missing_fallback_to_enter",
-                service=self.name,
-                error=str(e),
-            )
+            log.warning("send_button_missing_fallback_to_enter", service=self.name, error=str(e))
 
         if not sent:
+            log.warning("send_step_press_enter", service=self.name)
             await page.keyboard.press("Enter")
 
-        # Верификация отправки по состоянию интерфейса (не дольше 15 секунд).
+        # Verify send via UI state (max 15 seconds).
+        log.warning("send_step_verify_start", service=self.name)
         deadline = time.monotonic() + 15.0
         confirmed = False
+        last_reason = "timeout"
         while time.monotonic() < deadline:
             if await self._has(page, "stop_button", timeout_ms=50):
                 confirmed = True
+                last_reason = "stop_button_present"
                 break
 
             assistant_count, assistant_text = await self._assistant_state(page)
             if assistant_count > assistant_count_before:
                 confirmed = True
+                last_reason = "assistant_count_increased"
                 break
             if assistant_text and assistant_text != assistant_text_before:
                 confirmed = True
+                last_reason = "assistant_text_changed"
                 break
 
             if await self._message_count(page, "user_message") > user_before:
                 confirmed = True
+                last_reason = "user_count_increased"
                 break
 
             await asyncio.sleep(0.1)
 
         if not confirmed:
+            log.error("send_not_confirmed", service=self.name,
+                      assistant_count_before=assistant_count_before,
+                      user_before=user_before,
+                      page_url=page.url)
             raise WebBridgeError(f"send_not_confirmed service={self.name}")
 
-        # Сайт мог присвоить чату постоянный URL — сохраняем его в handle.
+        log.warning("send_confirmed", service=self.name, reason=last_reason)
+
+        # Site may assign a permanent chat URL — persist it into the handle.
         if page.url:
+            log.warning("send_step_update_chat_url", service=self.name, url=page.url)
             chat.chat_url = page.url
+
+        log.warning("send_done", service=self.name)
 
     async def _upload_files(self, page, files: Sequence[Path]) -> None:
         file_input = await self._find(page, "file_input", timeout_ms=3000)
@@ -462,7 +482,7 @@ class BrowserChatAdapter:
                     if empty_state is None:
                         empty_state = (count, "")
                 except Exception as e:
-                    log.debug(
+                    log.warning(
                         "assistant_state_failed",
                         selector=sel,
                         error=str(e),

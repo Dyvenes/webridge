@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import aiosqlite
+import asyncio
 
 from .history import history_hash
 
@@ -109,6 +110,8 @@ class Store:
     def __init__(self, path: Path):
         self._path = path
         self._conn: aiosqlite.Connection | None = None
+        self._transaction_lock = asyncio.Lock()
+
 
     async def connect(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -142,13 +145,14 @@ class Store:
 
     @asynccontextmanager
     async def transaction(self) -> AsyncIterator[None]:
-        await self.conn.execute("BEGIN IMMEDIATE")
-        try:
-            yield
-            await self.conn.commit()
-        except BaseException:
-            await self.conn.rollback()
-            raise
+        async with self._transaction_lock:
+            await self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield
+                await self.conn.commit()
+            except BaseException:
+                await self.conn.rollback()
+                raise
 
     # --- sessions -------------------------------------------------------
     @staticmethod
@@ -203,37 +207,42 @@ class Store:
         return await self.create_session(client_session_id, service, model_alias)
 
     async def touch_session(self, session_id: str) -> None:
-        await self.conn.execute(
-            "UPDATE sessions SET last_used_at=? WHERE id=?", (_now(), session_id)
-        )
-        await self.conn.commit()
+        async with self._transaction_lock:
+            await self.conn.execute(
+                "UPDATE sessions SET last_used_at=? WHERE id=?",
+                (_now(), session_id),
+            )
+            await self.conn.commit()
 
     async def update_session_chat(
-        self,
-        session_id: str,
-        chat_url: str | None,
-        remote_chat_id: str | None = None,
+            self,
+            session_id: str,
+            chat_url: str | None,
+            remote_chat_id: str | None = None,
     ) -> None:
-        await self.conn.execute(
-            "UPDATE sessions SET chat_url=?, remote_chat_id=?, last_used_at=? WHERE id=?",
-            (chat_url, remote_chat_id, _now(), session_id),
-        )
-        await self.conn.commit()
+        async with self._transaction_lock:
+            await self.conn.execute(
+                "UPDATE sessions SET chat_url=?, remote_chat_id=?, last_used_at=? WHERE id=?",
+                (chat_url, remote_chat_id, _now(), session_id),
+            )
+            await self.conn.commit()
 
     async def mark_needs_reset(self, session_id: str, reason: str) -> None:
-        await self.conn.execute(
-            "UPDATE sessions SET needs_reset=1, reset_reason=?, status='error', "
-            "last_used_at=? WHERE id=?",
-            (reason, _now(), session_id),
-        )
-        await self.conn.commit()
+        async with self._transaction_lock:
+            await self.conn.execute(
+                "UPDATE sessions SET needs_reset=1, reset_reason=?, status='error', "
+                "last_used_at=? WHERE id=?",
+                (reason, _now(), session_id),
+            )
+            await self.conn.commit()
 
     async def close_session(self, session_id: str) -> None:
-        await self.conn.execute(
-            "UPDATE sessions SET status='closed', last_used_at=? WHERE id=?",
-            (_now(), session_id),
-        )
-        await self.conn.commit()
+        async with self._transaction_lock:
+            await self.conn.execute(
+                "UPDATE sessions SET status='closed', last_used_at=? WHERE id=?",
+                (_now(), session_id),
+            )
+            await self.conn.commit()
 
     async def list_sessions(self, active_only: bool = True) -> list[dict[str, Any]]:
         query = "SELECT * FROM sessions"
@@ -248,47 +257,50 @@ class Store:
     async def create_turn(self, session_id: str, request_id: str, request_hash: str) -> str:
         turn_id = uuid.uuid4().hex
         now = _now()
-        try:
-            await self.conn.execute(
-                "INSERT INTO turns (id, session_id, request_id, request_hash, state, "
-                "created_at, updated_at) VALUES (?,?,?,?, 'prepared', ?, ?)",
-                (turn_id, session_id, request_id, request_hash, now, now),
-            )
-            await self.conn.commit()
-        except aiosqlite.IntegrityError:
-            # Старые базы могли сохранить UNIQUE(request_id). Клиентский
-            # request id не является ключом идемпотентности — он лишь
-            # коррелирует логи, поэтому коллизия не должна ломать ход.
-            await self.conn.rollback()
-            await self.conn.execute(
-                "INSERT INTO turns (id, session_id, request_id, request_hash, state, "
-                "created_at, updated_at) VALUES (?,?,?,?, 'prepared', ?, ?)",
-                (
-                    turn_id,
-                    session_id,
-                    f"{request_id}:{uuid.uuid4().hex[:8]}",
-                    request_hash,
-                    now,
-                    now,
-                ),
-            )
-            await self.conn.commit()
+
+        async with self._transaction_lock:
+            try:
+                await self.conn.execute(
+                    "INSERT INTO turns (id, session_id, request_id, request_hash, state, "
+                    "created_at, updated_at) VALUES (?,?,?,?, 'prepared', ?, ?)",
+                    (turn_id, session_id, request_id, request_hash, now, now),
+                )
+                await self.conn.commit()
+
+            except aiosqlite.IntegrityError:
+                await self.conn.rollback()
+
+                await self.conn.execute(
+                    "INSERT INTO turns (id, session_id, request_id, request_hash, state, "
+                    "created_at, updated_at) VALUES (?,?,?,?, 'prepared', ?, ?)",
+                    (
+                        turn_id,
+                        session_id,
+                        f"{request_id}:{uuid.uuid4().hex[:8]}",
+                        request_hash,
+                        now,
+                        now,
+                    ),
+                )
+                await self.conn.commit()
+
         return turn_id
 
     async def update_turn(
-        self,
-        turn_id: str,
-        state: str,
-        response_json: str | None = None,
-        response_text: str | None = None,
-        error: str | None = None,
+            self,
+            turn_id: str,
+            state: str,
+            response_json: str | None = None,
+            response_text: str | None = None,
+            error: str | None = None,
     ) -> None:
-        await self.conn.execute(
-            "UPDATE turns SET state=?, response_json=?, response_text=?, error=?, "
-            "updated_at=? WHERE id=?",
-            (state, response_json, response_text, error, _now(), turn_id),
-        )
-        await self.conn.commit()
+        async with self._transaction_lock:
+            await self.conn.execute(
+                "UPDATE turns SET state=?, response_json=?, response_text=?, error=?, "
+                "updated_at=? WHERE id=?",
+                (state, response_json, response_text, error, _now(), turn_id),
+            )
+            await self.conn.commit()
 
     async def get_turn(self, turn_id: str) -> dict[str, Any] | None:
         cur = await self.conn.execute("SELECT * FROM turns WHERE id=?", (turn_id,))
@@ -388,47 +400,57 @@ class Store:
         return int(row[0]) if row else 0
 
     async def bump_budget(self, service: str, window_start: str, kind: str) -> int:
-        await self.conn.execute(
-            "INSERT INTO budgets (service, window_start, window_kind, used) VALUES (?,?,?,1) "
-            "ON CONFLICT(service, window_start, window_kind) DO UPDATE SET used=used+1",
-            (service, window_start, kind),
-        )
-        await self.conn.commit()
-        return await self.get_budget(service, window_start, kind)
+        async with self._transaction_lock:
+            await self.conn.execute(
+                "INSERT INTO budgets (service, window_start, window_kind, used) VALUES (?,?,?,1) "
+                "ON CONFLICT(service, window_start, window_kind) DO UPDATE SET used=used+1",
+                (service, window_start, kind),
+            )
+            await self.conn.commit()
+
+            cur = await self.conn.execute(
+                "SELECT used FROM budgets WHERE service=? AND window_start=? AND window_kind=?",
+                (service, window_start, kind),
+            )
+            row = await cur.fetchone()
+
+        return int(row[0]) if row else 0
 
     # --- logs -----------------------------------------------------------
     async def log_request(
-        self,
-        service: str,
-        session_id: str | None,
-        turn_id: str | None,
-        model: str | None,
-        started_at: str,
-        duration_ms: int,
-        outcome: str,
-        error_type: str | None = None,
+            self,
+            service: str,
+            session_id: str | None,
+            turn_id: str | None,
+            model: str | None,
+            started_at: str,
+            duration_ms: int,
+            outcome: str,
+            error_type: str | None = None,
     ) -> None:
-        await self.conn.execute(
-            "INSERT INTO request_log (id, session_id, turn_id, service, model, "
-            "started_at, duration_ms, outcome, error_type) VALUES (?,?,?,?,?,?,?,?,?)",
-            (
-                uuid.uuid4().hex,
-                session_id,
-                turn_id,
-                service,
-                model,
-                started_at,
-                duration_ms,
-                outcome,
-                error_type,
-            ),
-        )
-        await self.conn.commit()
+        async with self._transaction_lock:
+            await self.conn.execute(
+                "INSERT INTO request_log (id, session_id, turn_id, service, model, "
+                "started_at, duration_ms, outcome, error_type) VALUES (?,?,?,?,?,?,?,?,?)",
+                (
+                    uuid.uuid4().hex,
+                    session_id,
+                    turn_id,
+                    service,
+                    model,
+                    started_at,
+                    duration_ms,
+                    outcome,
+                    error_type,
+                ),
+            )
+            await self.conn.commit()
 
     async def log_incident(self, service: str, kind: str, artifacts_dir: str | None) -> None:
-        await self.conn.execute(
-            "INSERT INTO incidents (id, service, kind, artifacts_dir, occurred_at) "
-            "VALUES (?,?,?,?,?)",
-            (uuid.uuid4().hex, service, kind, artifacts_dir, _now()),
-        )
-        await self.conn.commit()
+        async with self._transaction_lock:
+            await self.conn.execute(
+                "INSERT INTO incidents (id, service, kind, artifacts_dir, occurred_at) "
+                "VALUES (?,?,?,?,?)",
+                (uuid.uuid4().hex, service, kind, artifacts_dir, _now()),
+            )
+            await self.conn.commit()

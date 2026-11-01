@@ -16,7 +16,7 @@
         "chunkTimeout": false
       },
       "models": {
-        "deepseek-chat": {
+        "ds-chat": {
           "name": "DeepSeek Chat (web)",
           "capabilities": {
             "tools": true,
@@ -28,7 +28,7 @@
             "output": 8192
           }
         },
-        "deepseek-reasoner": {
+        "ds-reasoner": {
           "name": "DeepSeek Reasoner (web)",
           "capabilities": {
             "tools": true,

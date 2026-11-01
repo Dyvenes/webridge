@@ -13,6 +13,92 @@ class ParsedToolCall:
     name: str
     arguments: dict[str, Any] = field(default_factory=dict)
 
+# ---------------------------------------------------------------------------
+# DSML-формат DeepSeek:
+#   <｜｜DSML｜｜ calls>
+#   <｜｜DSML｜｜ invoke name="write">
+#   <｜｜DSML｜｜ parameter name="path" string="true">...</｜｜DSML｜｜ parameter>
+#   </｜｜DSML｜｜ invoke>
+#   </｜｜DSML｜｜ calls>
+# ---------------------------------------------------------------------------
+_DSML_OPEN = r"<[｜|]+\s*DSML\s*[｜|]+\s*"
+_DSML_CLOSE = r"</[｜|]+\s*DSML\s*[｜|]+\s*"
+_DSML_FLAGS = re.DOTALL | re.IGNORECASE
+
+_DSML_CALLS_OPEN_RE = re.compile(_DSML_OPEN + r"(?:function_)?calls\s*>", re.IGNORECASE)
+_DSML_CALLS_RE = re.compile(
+    _DSML_OPEN + r"(?:function_)?calls\s*>(.*?)" + _DSML_CLOSE + r"(?:function_)?calls\s*>",
+    _DSML_FLAGS,
+)
+_DSML_INVOKE_RE = re.compile(
+    _DSML_OPEN + r"invoke\b([^>]*)>(.*?)" + _DSML_CLOSE + r"invoke\s*>",
+    _DSML_FLAGS,
+)
+_DSML_PARAM_RE = re.compile(
+    _DSML_OPEN + r"parameter\b([^>]*)>(.*?)" + _DSML_CLOSE + r"parameter\s*>",
+    _DSML_FLAGS,
+)
+_STRING_ATTR_RE = re.compile(r"""\bstring\s*=\s*(?:"([^"]*)"|'([^']*)')""", re.IGNORECASE)
+# markdownify экранирует _ и * (например, new\_file.txt).
+_MD_ESCAPE_RE = re.compile(r"\\([_*])")
+
+
+def has_dsml_block(text: str) -> bool:
+    return _DSML_CALLS_OPEN_RE.search(text) is not None
+
+
+def strip_dsml_blocks(text: str) -> str:
+    cleaned = _DSML_CALLS_RE.sub("", text)
+    m = _DSML_CALLS_OPEN_RE.search(cleaned)  # незакрытый блок отбрасываем до конца
+    if m:
+        cleaned = cleaned[: m.start()]
+    return cleaned
+
+
+def _parse_dsml_params(body: str) -> dict[str, Any]:
+    args: dict[str, Any] = {}
+    for m in _DSML_PARAM_RE.finditer(body):
+        attrs = m.group(1)
+        pname = _attr_name(attrs)
+        if not pname:
+            continue
+        value = _MD_ESCAPE_RE.sub(r"\1", m.group(2))
+        sm = _STRING_ATTR_RE.search(attrs)
+        flag = ""
+        if sm:
+            flag = (sm.group(1) if sm.group(1) is not None else sm.group(2)).lower()
+        if flag == "false":
+            # Не строка: число, булево, список или объект в JSON.
+            try:
+                args[pname] = _soft_json_loads(value.strip())
+                continue
+            except ValueError:
+                pass
+        args[pname] = value
+    return args
+
+
+def parse_dsml_calls(text: str) -> list[ParsedToolCall]:
+    """Разбирает DSML-блоки. Пустой список — блоков нет."""
+    blocks = list(_DSML_CALLS_RE.finditer(text))
+    if not blocks:
+        if has_dsml_block(text):
+            raise ValueError("malformed DSML block: missing closing tag")
+        return []
+    calls: list[ParsedToolCall] = []
+    for block in blocks:
+        invokes = list(_DSML_INVOKE_RE.finditer(block.group(1)))
+        if not invokes:
+            raise ValueError("DSML block without invoke")
+        for inv in invokes:
+            name = _attr_name(inv.group(1))
+            if not name:
+                raise ValueError("missing DSML invoke name=...")
+            calls.append(
+                ParsedToolCall(name=name, arguments=_parse_dsml_params(inv.group(2)))
+            )
+    return calls
+
 
 # Открывающий фенс должен стоять отдельной строкой. Иначе ```tool внутри
 # обычного текста или кода ложно считается вызовом инструмента.
@@ -54,6 +140,7 @@ def find_tool_blocks(text: str) -> list[str]:
 
 def strip_tool_blocks(text: str) -> str:
     """Удаляет фенсы ```tool вместе с содержимым и обрезает пробелы."""
+    text = strip_dsml_blocks(text)
     spans, unterminated_start = _scan_tool_blocks(text)
     if not spans and unterminated_start is None:
         return text.strip()
@@ -74,7 +161,7 @@ def strip_tool_blocks(text: str) -> str:
 
 def has_tool_block(text: str) -> bool:
     """True, если в тексте есть открывающий фенс ```tool."""
-    return _FENCE_RE.search(text) is not None
+    return _FENCE_RE.search(text) is not None or has_dsml_block(text)
 
 
 _NAME_ATTR_RE = re.compile(r"""\bname\s*=\s*(?:"([^"]*)"|'([^']*)')""", re.IGNORECASE)
@@ -160,11 +247,12 @@ def parse_tool_calls(text: str, fmt: str = "xml") -> list[ParsedToolCall]:
     Если блок найден, но разобрать его не удалось, поднимает ValueError
     с понятным сообщением (вызывающий код превращает его в ProtocolError).
     """
+    dsml_calls = parse_dsml_calls(text)
     spans, unterminated_start = _scan_tool_blocks(text)
     if unterminated_start is not None:
         raise ValueError("malformed tool block: missing closing backtick fence")
     if not spans:
-        return []
+        return dsml_calls
     bodies = [text[start:end] for _, start, end, _ in spans]
     parsed: list[ParsedToolCall] = []
     for index, body in enumerate(bodies, start=1):
@@ -183,4 +271,4 @@ def parse_tool_calls(text: str, fmt: str = "xml") -> list[ParsedToolCall]:
             parsed.append(parse_json_body(body))
         except Exception as exc:
             raise ValueError(f"malformed tool block #{index}: {exc}") from exc
-    return parsed
+    return dsml_calls + parsed
