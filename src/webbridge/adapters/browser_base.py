@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import re
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from urllib.parse import urlparse
@@ -37,6 +38,8 @@ from .base import ChatHandle, Reply
 log = get_logger("adapter.browser")
 
 _UI_SELECTOR = 'button, [role="button"], svg, script, style, noscript'
+
+_LANG_LABEL_RE = re.compile(r"(?m)^[ \t]*tool[ \t]*\r?\n+[ \t]*(`{3,})[ \t]*\r?\n")
 
 
 def strip_ui_nodes(soup: BeautifulSoup) -> None:
@@ -468,6 +471,15 @@ class BrowserChatAdapter:
                     html = await last.evaluate(
                         """(el) => {
                             const copy = el.cloneNode(true);
+                            // DeepSeek рендерит $...$ как формулы KaTeX и портит $_ и подобное:
+                            // возвращаем исходный текст из <annotation>.
+                            copy.querySelectorAll('.katex-display, .katex').forEach(node => {
+                                if (!copy.contains(node)) return;  // вложенный узел уже заменён
+                                const ann = node.querySelector('annotation[encoding="application/x-tex"]');
+                                if (!ann) return;
+                                const d = node.classList.contains('katex-display') ? '$$' : '$';
+                                node.replaceWith(document.createTextNode(d + ann.textContent + d));
+                            });
                             copy.querySelectorAll(
                                 'button, [role="button"], svg, script, style'
                             ).forEach(node => node.remove());
@@ -526,11 +538,14 @@ class BrowserChatAdapter:
         """Базовая конвертация HTML сообщения в Markdown."""
         soup = BeautifulSoup(html, "html.parser")
         strip_ui_nodes(soup)
-        return html_to_markdown(
+        text = html_to_markdown(
             str(soup),
             heading_style="ATX",
             bullets="-",
         ).strip()
+        # DeepSeek показывает язык блока кода отдельной подписью над ним:
+        # после конвертации получается «tool» + «```» вместо «```tool».
+        return _LANG_LABEL_RE.sub(r"\1tool\n", text)
 
     async def wait_done(
         self,

@@ -272,3 +272,12 @@ def parse_tool_calls(text: str, fmt: str = "xml") -> list[ParsedToolCall]:
         except Exception as exc:
             raise ValueError(f"malformed tool block #{index}: {exc}") from exc
     return dsml_calls + parsed
+
+_BROKEN_CALL_RE = re.compile(
+    r"(?im)^[ \t]*tool[ \t]*$|<call\s+name\s*=|<arg\s+name\s*=|</call\s*>|DSML|<invoke\b"
+)
+
+
+def looks_like_broken_tool_call(text: str) -> bool:
+    """Нет распознанного блока, но текст похож на неудавшуюся попытку вызова."""
+    return not has_tool_block(text) and _BROKEN_CALL_RE.search(text) is not None

@@ -61,7 +61,7 @@ from webbridge.errors import (
 )
 from webbridge.limits.budget import BudgetManager
 from webbridge.observability.logging import get_logger
-from webbridge.protocol.parse import has_tool_block, parse_tool_calls, strip_tool_blocks
+from webbridge.protocol.parse import has_tool_block, parse_tool_calls, strip_tool_blocks, looks_like_broken_tool_call
 from webbridge.protocol.render import (
     render_delta,
     render_initial,
@@ -71,6 +71,15 @@ from webbridge.protocol.render import (
 from webbridge.protocol.schema_validate import validate_tool_call
 
 log = get_logger("service")
+
+MAX_TOOL_REPAIRS = 2
+
+_TOOL_REPAIR_PROMPT = (
+    "System notice: your last reply contained a tool call that could not be parsed "
+    "({problem}). Repeat ONLY the tool call in the required format: a fenced block "
+    "opened by a line ```tool, then <call name=\"...\"><arg name=\"...\">...</arg></call>, "
+    "then a closing ``` line. Do not use DSML or any other tags."
+)
 
 
 def _request_id(headers: dict[str, str]) -> str:
@@ -593,16 +602,7 @@ class Turn:
             if self.tool_mode:
                 # Буферизуем ответ, чтобы не отправить клиенту текстовый
                 # tool-блок вместо OpenAI tool_calls.
-                parts: list[str] = []
-                async for delta in self.adapter.stream(self.handle):
-                    if delta:
-                        parts.append(delta)
-                text = "".join(parts)
-                if not text:
-                    raise GenerationTimeout(
-                        f"{self.service_name}: stream finished without response"
-                    )
-                message, finish = await self._build_response(text)
+                message, finish = await self._tool_reply()
                 await self.commit(message)
                 async for chunk in self._emit(response_id, message, finish, include_usage):
                     yield chunk
@@ -652,6 +652,42 @@ class Turn:
             yield done_chunk()
         finally:
             await self.aclose()
+
+    async def _read_stream(self) -> str:
+        parts: list[str] = []
+        async for delta in self.adapter.stream(self.handle):
+            if delta:
+                parts.append(delta)
+        text = "".join(parts)
+        if not text:
+            raise GenerationTimeout(f"{self.service_name}: stream finished without response")
+        return text
+
+    async def _tool_reply(self) -> tuple[dict[str, Any], str]:
+        """Читает ответ; при битом вызове просит модель повторить (до MAX_TOOL_REPAIRS раз)."""
+        text = await self._read_stream()
+        for attempt in range(MAX_TOOL_REPAIRS + 1):
+            problem = ""
+            if looks_like_broken_tool_call(text):
+                problem = "no valid tool block found"
+            else:
+                try:
+                    return await self._build_response(text)
+                except ProtocolError as exc:
+                    if attempt == MAX_TOOL_REPAIRS:
+                        raise
+                    problem = str(exc)
+            if attempt == MAX_TOOL_REPAIRS:
+                break  # сдаёмся: отдаём как обычный текст
+            log.warning(
+                "tool_call_repair",
+                session_id=self.session_id,
+                attempt=attempt + 1,
+                problem=problem,
+            )
+            await self.adapter.send(self.handle, _TOOL_REPAIR_PROMPT.format(problem=problem))
+            text = await self._read_stream()
+        return await self._build_response(text)
 
     async def _replay(self, response_id: str, message: dict[str, Any]) -> AsyncIterator[bytes]:
         if message.get("tool_calls"):

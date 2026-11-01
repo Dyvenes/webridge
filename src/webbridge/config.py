@@ -48,12 +48,12 @@ services:
     models:
       deepseek-chat: "DeepSeek"
       deepseek-reasoner: "DeepSeek-R1"
-    context_window: 64000
+    context_window: 128000
     max_output_tokens: 8192
     limits:
-      max_message_chars: 50000
-      max_requests_per_hour: 25
-      max_requests_per_day: 200
+      max_message_chars: 100000
+      max_requests_per_hour: 100
+      max_requests_per_day: 1000
       max_parallel_chats: 1
       max_generation_s: 300
 
@@ -129,7 +129,7 @@ class ServiceConfig(BaseModel):
     models: dict[str, str] = Field(default_factory=dict)
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
     protocol_format: str = "xml"
-    context_window: int = 64000
+    context_window: int = 128000
     max_output_tokens: int = 8192
     # Если true, невозможность выбрать модель в UI — ошибка, а не warning.
     strict_model: bool = False

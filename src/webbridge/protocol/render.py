@@ -14,16 +14,13 @@ _PROMPT_PATH = Path(__file__).parent / "prompts" / "system.md"
 # с содержимым файла, чтобы поведение не менялось при наличии/отсутствии файла.
 SYSTEM_PROMPT_FALLBACK = """\
 You are operating as a coding agent through a text-only channel.
-You can call tools. To call one or more tools, output fenced blocks like this:
+You can call tools. To call one or more tools, use dsml:
 
-```tool
-<call name="TOOL_NAME">
-<arg name="ARG_NAME">VALUE</arg>
-</call>
-<call name="OTHER_TOOL">
-<arg name="ARG_NAME">VALUE</arg>
-</call>
-```
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="read">
+<｜｜DSML｜｜ parameter name="path" string="true">d:\PythonProjects\draft</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>
 
 Rules:
 
