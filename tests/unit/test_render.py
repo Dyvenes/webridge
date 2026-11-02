@@ -265,7 +265,7 @@ def test_render_initial_full_transcript():
         {"role": "assistant", "content": "Done."},
     ]
     tools = [_tool("read_file", props={"path": {"type": "string"}})]
-    out = render_initial(messages, tools, tool_choice="required")
+    out = render_initial(messages, "deepseek", tools, tool_choice="required")
 
     assert "You are operating as a coding agent" in out
     assert "You must call one of the tools." in out
@@ -280,7 +280,7 @@ def test_render_initial_full_transcript():
 
 
 def test_render_initial_no_tools():
-    out = render_initial([{"role": "user", "content": "hi"}], tools=None)
+    out = render_initial([{"role": "user", "content": "hi"}], "deepseek", tools=None)
     assert "(no tools available)" in out
     assert "[User]\nhi" in out
 

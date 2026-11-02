@@ -31,6 +31,7 @@ from webbridge.errors import (
 )
 from webbridge.observability.logging import get_logger
 from webbridge.session.manager import BrowserSession
+from webbridge.adapters.chatgpt_markdown import restore_fence_languages
 
 from . import humanize
 from .base import ChatHandle, Reply
@@ -40,6 +41,34 @@ log = get_logger("adapter.browser")
 _UI_SELECTOR = 'button, [role="button"], svg, script, style, noscript'
 
 _LANG_LABEL_RE = re.compile(r"(?m)^[ \t]*tool[ \t]*\r?\n+[ \t]*(`{3,})[ \t]*\r?\n")
+
+_REPEAT_TAIL_RE = re.compile(r"(?s)(\S{4,80}?)(?:\s*\1){9,}\s*\Z")
+
+
+def _pre_language(el) -> str:
+    """Язык блока для markdownify. Блок с <call name=…> всегда считаем tool."""
+    if re.search(r"<call\s+name\s*=", el.get_text()):
+        return "tool"
+    code = el.find("code")
+    for node in (code, el):
+        if node is None:
+            continue
+        for cls in node.get("class") or []:
+            if cls.startswith("language-"):
+                return cls[len("language-"):]
+    return ""
+
+
+def _find_degenerate_loop(text: str) -> int | None:
+    """Индекс начала зацикленного хвоста (10+ повторов тега DSML), иначе None."""
+    tail_start = max(0, len(text) - 1500)
+    m = _REPEAT_TAIL_RE.search(text[tail_start:])
+    if not m:
+        return None
+    unit = m.group(1)
+    if "｜" not in unit and "DSML" not in unit:
+        return None  # обычные повторы (разделители, таблицы) не считаем зацикливанием
+    return tail_start + m.start()
 
 
 def strip_ui_nodes(soup: BeautifulSoup) -> None:
@@ -64,11 +93,11 @@ class BrowserChatAdapter:
     type = "generic"
 
     def __init__(
-        self,
-        name: str,
-        service: ServiceConfig,
-        session: BrowserSession,
-        humanize_cfg: HumanizeConfig,
+            self,
+            name: str,
+            service: ServiceConfig,
+            session: BrowserSession,
+            humanize_cfg: HumanizeConfig,
     ):
         self.name = name
         self.config = service
@@ -115,6 +144,35 @@ class BrowserChatAdapter:
                 return False
             await asyncio.sleep(0.05)
 
+    async def _match(self, page, key: str, timeout_ms: int = 100) -> str | None:
+        """Как _has, но возвращает сработавший селектор (для диагностики)."""
+        candidates = self._selectors.get(key, [])
+        deadline = time.monotonic() + max(0, timeout_ms) / 1000.0
+        while True:
+            for sel in candidates:
+                try:
+                    if await page.locator(sel).first.is_visible():
+                        return sel
+                except Exception:
+                    continue
+            if time.monotonic() >= deadline:
+                return None
+            await asyncio.sleep(0.05)
+
+    async def _captcha_present(self, page) -> bool:
+        sel = await self._match(page, "captcha_indicator", 100)
+        if sel is None:
+            return False
+        if not sel.startswith("text="):
+            log.warning("captcha_detected", service=self.name, selector=sel, kind="structural")
+            return True
+        # Текст мог просто встретиться в самой беседе (код, результаты инструментов).
+        # Настоящая проверка закрывает поле ввода.
+        if not await self._has(page, "input", timeout_ms=300):
+            log.warning("captcha_detected", service=self.name, selector=sel, kind="text_no_input")
+            return True
+        return False
+
     async def _message_count(self, page, key: str) -> int:
         best = 0
         for sel in self._selectors.get(key, []):
@@ -126,9 +184,9 @@ class BrowserChatAdapter:
 
     async def _messages_empty(self, page) -> bool:
         for key in (
-            "user_message",
-            "assistant_message",
-            "assistant_message_content",
+                "user_message",
+                "assistant_message",
+                "assistant_message_content",
         ):
             if await self._message_count(page, key) > 0:
                 return False
@@ -159,7 +217,6 @@ class BrowserChatAdapter:
         page = await self._session.get_page("default")
         await self._ensure_base_page(page)
         return await self._session.check_health(page, self._selectors)
-
 
     async def new_chat(self, model: str | None = None, page_key: str = "default") -> ChatHandle:
         log.warning("TRYING TO CREATE NEW CHAT")
@@ -209,7 +266,6 @@ class BrowserChatAdapter:
             page_key=page_key,
             meta={"page": page},
         )
-
 
     async def _wait_chat_changed(self, page, before_url: str, timeout_s: float = 5.0) -> bool:
         deadline = time.monotonic() + timeout_s
@@ -334,9 +390,9 @@ class BrowserChatAdapter:
         assistant_count_before, assistant_text_before = await self._assistant_state(page)
         user_before = await self._message_count(page, "user_message")
         log.warning("send_state_before_captured", service=self.name,
-                  assistant_count=assistant_count_before,
-                  user_count=user_before,
-                  assistant_text_len=len(assistant_text_before or ""))
+                    assistant_count=assistant_count_before,
+                    user_count=user_before,
+                    assistant_text_len=len(assistant_text_before or ""))
 
         chat.meta["assistant_count_before"] = assistant_count_before
         chat.meta["assistant_text_before"] = assistant_text_before
@@ -535,25 +591,33 @@ class BrowserChatAdapter:
         return await self._extract_dom(page)
 
     def extract_markdown(self, html: str) -> str:
-        """Базовая конвертация HTML сообщения в Markdown."""
         soup = BeautifulSoup(html, "html.parser")
         strip_ui_nodes(soup)
+        # Шапка блока кода (название языка, «Copy code») лежит внутри <pre>
+        # и попадает в текст; оставляем только <code>.
+        for pre in soup.find_all("pre"):
+            code = pre.find("code")
+            if code is not None:
+                code.extract()
+                pre.clear()
+                pre.append(code)
         text = html_to_markdown(
             str(soup),
             heading_style="ATX",
             bullets="-",
+            code_language_callback=_pre_language,
         ).strip()
-        # DeepSeek показывает язык блока кода отдельной подписью над ним:
-        # после конвертации получается «tool» + «```» вместо «```tool».
         return _LANG_LABEL_RE.sub(r"\1tool\n", text)
 
     async def wait_done(
-        self,
-        chat: ChatHandle,
-        timeout_s: float = 300.0,
-        stable_s: float = 1.5,
+            self,
+            chat: ChatHandle,
+            timeout_s: float = 300.0,
+            stable_s: float = 1.5,
     ) -> Reply:
         page = self._chat_page(chat)
+
+        banner_since: float | None = None
 
         started = time.monotonic()
         deadline = started + timeout_s
@@ -565,19 +629,28 @@ class BrowserChatAdapter:
         last_change = started
 
         while time.monotonic() < deadline:
-            if await self._has(page, "captcha_indicator", timeout_ms=100):
+            if await self._captcha_present(page):
                 raise CaptchaRequired(self.name)
-
-            if await self._has(page, "rate_limit_banner", timeout_ms=100):
-                raise RateLimited(self.name)
 
             stop_visible = await self._has(page, "stop_button", timeout_ms=50)
             assistant_count, current = await self._assistant_state(page)
 
             # Ответ должен отличаться от состояния до отправки.
             is_new_reply = assistant_count > baseline_count or (
-                bool(current) and current != baseline_text
+                    bool(current) and current != baseline_text
             )
+
+            banner_visible = await self._has(page, "rate_limit_banner", timeout_ms=100)
+            if banner_visible and not stop_visible and not is_new_reply:
+                # Баннер без признаков генерации держится 15 секунд: это настоящее
+                # ограничение. Совпадение текста в самой беседе сюда не попадает:
+                # там блок ответа уже появился.
+                if banner_since is None:
+                    banner_since = time.monotonic()
+                elif time.monotonic() - banner_since >= 15:
+                    raise RateLimited(self.name)
+            else:
+                banner_since = None
 
             if is_new_reply and current:
                 if current != last_text:
@@ -636,7 +709,11 @@ class BrowserChatAdapter:
 
         prev = ""
         last_change = started
+        continues = 0
         saw_reply = False
+        click_count: int | None = None
+        click_prefix = ""
+        banner_since: float | None = None
         last_log = started
 
         log.info(
@@ -649,11 +726,8 @@ class BrowserChatAdapter:
 
         while time.monotonic() < deadline:
             # Проверяем критические состояния страницы.
-            if await self._has(page, "captcha_indicator", timeout_ms=100):
+            if await self._captcha_present(page):
                 raise CaptchaRequired(self.name)
-
-            if await self._has(page, "rate_limit_banner", timeout_ms=100):
-                raise RateLimited(self.name)
 
             try:
                 count, current = await self._assistant_state(page)
@@ -668,28 +742,56 @@ class BrowserChatAdapter:
             is_new_reply = count > baseline_count or (bool(current) and current != baseline_text)
             stop_visible = await self._has(page, "stop_button", timeout_ms=50)
 
+            banner_visible = await self._has(page, "rate_limit_banner", timeout_ms=100)
+            if banner_visible and not stop_visible and not is_new_reply:
+                # Баннер без признаков генерации держится 15 секунд: это настоящее
+                # ограничение. Совпадение текста в самой беседе сюда не попадает:
+                # там блок ответа уже появился.
+                if banner_since is None:
+                    banner_since = time.monotonic()
+                elif time.monotonic() - banner_since >= 15:
+                    raise RateLimited(self.name)
+            else:
+                banner_since = None
+
+            # Продолжение после «Continue» может прийти новым сообщением ассистента.
+            if click_count is not None and count > click_count:
+                text_now = click_prefix + current
+            else:
+                text_now = current
+
+            loop_at = _find_degenerate_loop(text_now) if is_new_reply else None
+            if loop_at is not None:
+                clean = text_now[:loop_at].rstrip()
+                log.error(
+                    "stream_degenerate_output",
+                    service=self.name,
+                    total_length=len(text_now),
+                    kept_length=len(clean),
+                    tail=text_now[-120:],
+                )
+                chat.meta["degenerate"] = True
+                await self.cancel(chat)  # сработает, когда появится реальный селектор «Стоп»
+                # Запасной вариант: ждём, пока модель сама упрётся в лимит ответа.
+                quiet_since = time.monotonic()
+                last_len = len(current)
+                wait_until = time.monotonic() + 40
+                while time.monotonic() < wait_until:
+                    await asyncio.sleep(0.5)
+                    _c, cur2 = await self._assistant_state(page)
+                    if len(cur2) != last_len:
+                        last_len = len(cur2)
+                        quiet_since = time.monotonic()
+                    elif time.monotonic() - quiet_since >= 2.0:
+                        break
+                yield clean
+                return
+
             if is_new_reply and current:
                 saw_reply = True
 
-                if current != prev:
-                    # DOM обычно содержит полный текст на текущий момент.
-                    # Отправляем только новую часть, если ответ дополняется.
-                    if current.startswith(prev):
-                        delta = current[len(prev) :]
-                    else:
-                        # Уже отправленные SSE-дельты отредактировать нельзя.
-                        log.warning(
-                            "stream_text_rewritten",
-                            service=self.name,
-                            previous_length=len(prev),
-                            current_length=len(current),
-                        )
-                        delta = ""
-
-                    if delta:
-                        yield delta
-
-                    prev = current
+                if text_now != prev:
+                    prev = text_now
                     last_change = time.monotonic()
 
             now = time.monotonic()
@@ -709,6 +811,26 @@ class BrowserChatAdapter:
 
             # Завершаем поток после появления ответа и остановки генерации.
             if saw_reply and not stop_visible and now - last_change >= 1.5:
+                if continues < 5 and await self._has(page, "continue_button", timeout_ms=200):
+                    try:
+                        btn = await self._find(page, "continue_button", timeout_ms=1000)
+                        click_prefix = prev
+                        click_count = count
+                        await btn.click()
+                        continues += 1
+                        # Запас: генерация может стартовать не сразу.
+                        last_change = time.monotonic() + 8.0
+                        log.warning(
+                            "stream_continue_clicked",
+                            service=self.name,
+                            n=continues,
+                            assistant_count=count,
+                            text_length=len(prev),
+                        )
+                        await asyncio.sleep(0.5)
+                        continue
+                    except Exception as e:
+                        log.warning("stream_continue_failed", service=self.name, error=str(e))
                 # Финальный текст может быть полнее DOM (например, Copy).
                 try:
                     final_text = await self._extract_final(page)
@@ -720,11 +842,20 @@ class BrowserChatAdapter:
                     )
                     final_text = ""
 
-                if final_text and final_text != prev and final_text.startswith(prev):
-                    delta = final_text[len(prev) :]
-                    if delta:
-                        yield delta
-                    prev = final_text
+                # Текст копирования точнее DOM (нет экранирования и подмен), но
+                # кнопка «Copy» может копировать только один блок кода. Защита:
+                # берём его, только если он не короче 90% текста из DOM.
+                use_copy = bool(final_text and final_text.strip()) and len(final_text) >= 0.9 * len(prev)
+                result = restore_fence_languages(final_text, prev) if use_copy else prev
+                log.info(
+                    "stream_final_choice",
+                    service=self.name,
+                    dom_len=len(prev),
+                    copy_len=len(final_text or ""),
+                    used="copy" if use_copy else "dom",
+                )
+                yield result
+                prev = result
 
                 if page.url:
                     chat.chat_url = page.url

@@ -100,15 +100,78 @@ def parse_dsml_calls(text: str) -> list[ParsedToolCall]:
     return calls
 
 
+# Сырые аргументы: <arg name="x" raw="TOKEN">\n ...текст... \nTOKEN
+_RAW_OPEN_RE = re.compile(
+    r"""<arg\b[^>\n]*?\braw\s*=\s*(?:"([^"\n]+)"|'([^'\n]+)')[^>\n]*>[ \t]*\r?\n"""
+)
+_ARG_CLOSE_RE = re.compile(r"\s*</arg\s*>")
+_RAW_PLACEHOLDER = "\x00RAW{}\x00"
+
+
+def _raw_regions(text: str, start: int = 0) -> list[tuple[int, int, int, int, str]]:
+    """(начало тега, начало содержимого, конец содержимого, конец токена, токен)."""
+    regions: list[tuple[int, int, int, int, str]] = []
+    pos = start
+    while True:
+        m = _RAW_OPEN_RE.search(text, pos)
+        if not m:
+            break
+        token = m.group(1) or m.group(2)
+        term = re.compile(rf"(?m)^[ \t]*{re.escape(token)}[ \t]*\r?$")
+        tm = term.search(text, m.end())
+        if not tm:
+            break  # незакрытый raw-блок: не трогаем
+        regions.append((m.start(), m.end(), tm.start(), tm.end(), token))
+        pos = tm.end()
+    return regions
+
+
+def _find_close_fence(text: str, start: int, flen: int):
+    """Закрывающий фенс, пропуская всё, что внутри raw-аргументов."""
+    close_re = re.compile(rf"(?m)^[ \t]*`{{{flen},}}[ \t]*\r?$")
+    regions = _raw_regions(text, start)
+    pos = start
+    while True:
+        cm = close_re.search(text, pos)
+        if cm is None:
+            return None
+        inside = next((r for r in regions if r[1] <= cm.start() < r[3]), None)
+        if inside is None:
+            return cm
+        pos = inside[3]
+
+
+def _extract_raw_args(body: str) -> tuple[str, dict[str, str]]:
+    """Заменяет raw-аргументы заглушками, чтобы регулярки их не видели."""
+    raws: dict[str, str] = {}
+    out: list[str] = []
+    last = 0
+    for i, (tag_start, content_start, content_end, end, _token) in enumerate(_raw_regions(body)):
+        name = _attr_name(body[tag_start:content_start])
+        if not name:
+            continue
+        content = body[content_start:content_end]
+        # Убираем только один перевод строки перед токеном.
+        content = content[:-2] if content.endswith("\r\n") else content[:-1] if content.endswith("\n") else content
+        key = _RAW_PLACEHOLDER.format(i)
+        raws[key] = content
+        out.append(body[last:tag_start])
+        out.append(f'<arg name="{name}">{key}</arg>')
+        close = _ARG_CLOSE_RE.match(body, end)
+        last = close.end() if close else end
+    out.append(body[last:])
+    return "".join(out), raws
+
+
 # Открывающий фенс должен стоять отдельной строкой. Иначе ```tool внутри
 # обычного текста или кода ложно считается вызовом инструмента.
 _FENCE_RE = re.compile(r"(?m)^[ \t]*(`{3,})tool[ \t]*\r?$")
 
 
-def _scan_tool_blocks(
+def _scan_labelled_blocks(
     text: str,
 ) -> tuple[list[tuple[int, int, int, int]], int | None]:
-    """Возвращает span'ы блоков и начало незакрытого блока (если есть).
+    """Блоки с меткой ```tool: span'ы и начало незакрытого блока (если есть).
 
     Span: (start фенса, начало тела, конец тела, конец закрывающего фенса).
     """
@@ -122,14 +185,76 @@ def _scan_tool_blocks(
         flen = len(m.group(1))
         start = m.end()
         # Закрывающий фенс — тоже отдельная строка, не короче открывающего.
-        close_re = re.compile(rf"(?m)^[ \t]*`{{{flen},}}[ \t]*\r?$")
-        cm = close_re.search(text, start)
+        cm = _find_close_fence(text, start, flen)
         if not cm:
             unterminated_start = m.start()
             break
         spans.append((m.start(), start, cm.start(), cm.end()))
         i = cm.end()
     return spans, unterminated_start
+
+
+# ChatGPT при копировании ответа («Copy») теряет метку языка у блока кода:
+# в интерфейсе подпись ``tool`` есть, а в скопированном тексте фенс голый (```)
+# и строки разделены \r\n. Поэтому, если размеченных блоков нет, принимаем
+# фенс без метки (или с нейтральной меткой), чьё тело целиком является вызовом.
+_ANY_FENCE_RE = re.compile(r"(?m)^[ \t]*(`{3,})([A-Za-z0-9_+.\-]*)[ \t]*\r?$")
+_NEUTRAL_LANGS = frozenset({"", "xml", "json", "text", "txt", "plain", "plaintext"})
+_TOOLISH_XML_RE = re.compile(
+    r"""^\s*<call\s+name\s*=\s*(["'])[^"']+\1\s*(?:/>|>.*</call\s*>)\s*$""", re.DOTALL
+)
+_TOOL_START_RE = re.compile(r"\s*<call\s+name\s*=")
+
+
+def _looks_like_tool_body(body: str) -> bool:
+    """Тело блока само по себе — законченный вызов (XML <call> или JSON name+arguments)."""
+    s = body.strip()
+    if not s:
+        return False
+    if _TOOLISH_XML_RE.match(s):
+        return True
+    if s.startswith("{") and s.endswith("}"):
+        try:
+            data = _soft_json_loads(s)
+        except ValueError:
+            return False
+        return isinstance(data, dict) and isinstance(data.get("name"), str) and "arguments" in data
+    return False
+
+
+def _scan_untagged_blocks(
+    text: str,
+) -> tuple[list[tuple[int, int, int, int]], int | None]:
+    """Блоки без метки ``tool``, по содержимому похожие на вызов. Формат как у _scan_labelled_blocks."""
+    spans: list[tuple[int, int, int, int]] = []
+    unterminated_start: int | None = None
+    i, n = 0, len(text)
+    while i < n:
+        m = _ANY_FENCE_RE.search(text, i)
+        if not m:
+            break
+        flen = len(m.group(1))
+        start = m.end()
+        neutral = m.group(2).lower() in _NEUTRAL_LANGS
+        cm = _find_close_fence(text, start, flen)
+        if not cm:
+            if neutral and _TOOL_START_RE.match(text, start):
+                unterminated_start = m.start()  # ответ оборвался внутри вызова
+            break
+        if neutral and _looks_like_tool_body(text[start : cm.start()]):
+            spans.append((m.start(), start, cm.start(), cm.end()))
+        i = cm.end()  # перепрыгиваем весь блок, чтобы не принять закрывающий фенс за открывающий
+    return spans, unterminated_start
+
+
+def _scan_tool_blocks(
+    text: str,
+) -> tuple[list[tuple[int, int, int, int]], int | None]:
+    """Размеченные блоки ```tool; если их нет — блоки без метки, похожие на вызов."""
+    spans, unterminated_start = _scan_labelled_blocks(text)
+    if spans or unterminated_start is not None:
+        return spans, unterminated_start
+    return _scan_untagged_blocks(text)
 
 
 def find_tool_blocks(text: str) -> list[str]:
@@ -160,8 +285,9 @@ def strip_tool_blocks(text: str) -> str:
 
 
 def has_tool_block(text: str) -> bool:
-    """True, если в тексте есть открывающий фенс ```tool."""
-    return _FENCE_RE.search(text) is not None or has_dsml_block(text)
+    """True, если в тексте есть блок вызова: ```tool, фенс без метки с вызовом внутри или DSML."""
+    spans, unterminated_start = _scan_tool_blocks(text)
+    return bool(spans) or unterminated_start is not None or has_dsml_block(text)
 
 
 _NAME_ATTR_RE = re.compile(r"""\bname\s*=\s*(?:"([^"]*)"|'([^']*)')""", re.IGNORECASE)
@@ -194,12 +320,17 @@ def _parse_args(body: str) -> dict[str, Any]:
 def parse_xml_calls(body: str) -> list[ParsedToolCall]:
     """Разбирает один или несколько ``<call>`` в теле tool-блока."""
     calls: list[ParsedToolCall] = []
+    body, raws = _extract_raw_args(body)
     for match in _CALL_BLOCK_RE.finditer(body):
         name = _attr_name(match.group(1))
         if not name:
             raise ValueError("missing <call name=...>")
         calls.append(ParsedToolCall(name=name, arguments=_parse_args(match.group(2))))
     if calls:
+        for call in calls:
+            for key, value in call.arguments.items():
+                if isinstance(value, str) and value in raws:
+                    call.arguments[key] = raws[value]
         return calls
 
     for match in _CALL_SELF_RE.finditer(body):
@@ -208,6 +339,10 @@ def parse_xml_calls(body: str) -> list[ParsedToolCall]:
             raise ValueError("missing <call name=...>")
         calls.append(ParsedToolCall(name=name, arguments={}))
     if calls:
+        for call in calls:
+            for key, value in call.arguments.items():
+                if isinstance(value, str) and value in raws:
+                    call.arguments[key] = raws[value]
         return calls
 
     raise ValueError("missing <call name=...>")
@@ -281,3 +416,28 @@ _BROKEN_CALL_RE = re.compile(
 def looks_like_broken_tool_call(text: str) -> bool:
     """Нет распознанного блока, но текст похож на неудавшуюся попытку вызова."""
     return not has_tool_block(text) and _BROKEN_CALL_RE.search(text) is not None
+
+
+_CALL_OPEN_ANY_RE = re.compile(r"<call\b[^>]*?(?<!/)>")
+_CALL_CLOSE_ANY_RE = re.compile(r"</call\s*>")
+
+
+def _mask_raw(text: str) -> str:
+    """Вырезает содержимое закрытых raw-аргументов (там могут быть любые теги)."""
+    out: list[str] = []
+    last = 0
+    for _tag_start, content_start, content_end, _end, _token in _raw_regions(text):
+        out.append(text[last:content_start])
+        last = content_end
+    out.append(text[last:])
+    return "".join(out)
+
+
+def tool_call_truncated(text: str) -> bool:
+    """True, если вызов начат, но не закрыт: ответ, видимо, оборвался по лимиту."""
+    if not (has_tool_block(text) or has_dsml_block(text)):
+        return False
+    if len(_RAW_OPEN_RE.findall(text)) > len(_raw_regions(text)):
+        return True  # raw-аргумент без завершающего токена
+    masked = _mask_raw(text)
+    return len(_CALL_OPEN_ANY_RE.findall(masked)) > len(_CALL_CLOSE_ANY_RE.findall(masked))

@@ -25,37 +25,27 @@ DEFAULT_CONFIG_YAML = """\
 bridge:
   host: 127.0.0.1
   port: 8000
-  api_token_ref: file:~/.webbridge/api_token
-  db_path: ~/.webbridge/state.sqlite3
-  enable_docs: false
-
-humanize:
-  min_delay_s: 1.2
-  max_delay_s: 4.5
-  typing_mode: paste
-  between_requests_s: [3, 9]
 
 services:
   deepseek:
-    type: deepseek
     enabled: true
     base_url: https://chat.deepseek.com/
     profile_dir: ~/.webbridge/profiles/deepseek
-    selectors_file: ~/.webbridge/selectors/deepseek.yaml
     browser:
-      channel: chrome
+      channel: null
       headless: false
+    selectors_file: ~/.webbridge/selectors/deepseek.yaml
     models:
-      deepseek-chat: "DeepSeek"
-      deepseek-reasoner: "DeepSeek-R1"
-    context_window: 128000
-    max_output_tokens: 8192
+      ds-chat: "DeepSeek"
+      ds-reasoner: "DeepSeek-R1"
     limits:
-      max_message_chars: 100000
+      max_message_chars: 100000000
       max_requests_per_hour: 100
       max_requests_per_day: 1000
       max_parallel_chats: 1
-      max_generation_s: 300
+    tier2:
+      enabled: false
+    protocol_format: dsml
 
   claude:
     type: claude
@@ -77,10 +67,33 @@ services:
       max_requests_per_day: 200
       max_parallel_chats: 1
       max_generation_s: 300
+    protocol_format: xml
+
+  chatGPT:
+    type: chatGPT
+    enabled: true
+    base_url: https://chatgpt.com//new
+    profile_dir: ~/.webbridge/profiles/chatGPT
+    selectors_file: ~/.webbridge/selectors/chatGPT.yaml
+    browser:
+      channel: chrome
+      headless: false
+    models:
+      chatGPT: "chatGPT"
+    context_window: 200000
+    max_output_tokens: 8192
+    limits:
+      max_message_chars: 100000
+      max_requests_per_hour: 25
+      max_requests_per_day: 200
+      max_parallel_chats: 1
+      max_generation_s: 300
+    protocol_format: xml
 
 routing:
-  default_model: deepseek-chat
-  fallbacks: {}
+  default_model: ds-chat
+  fallbacks:
+    ds-chat: [ds-reasoner]
 """
 
 
@@ -110,11 +123,12 @@ class BrowserConfig(BaseModel):
 
 
 class LimitsConfig(BaseModel):
-    max_message_chars: int = 60000
+    max_message_chars: int = 100000000
     max_requests_per_hour: int = 40
     max_requests_per_day: int = 250
     max_parallel_chats: int = 1
     max_generation_s: float = 300.0
+
 
 
 class ServiceConfig(BaseModel):
@@ -126,7 +140,7 @@ class ServiceConfig(BaseModel):
     profile_dir: Path
     browser: BrowserConfig = Field(default_factory=BrowserConfig)
     selectors_file: Path
-    models: dict[str, str] = Field(default_factory=dict)
+    models: dict[str, str] = Field(default_factory=dict[str: Any])
     limits: LimitsConfig = Field(default_factory=LimitsConfig)
     protocol_format: str = "xml"
     context_window: int = 128000
@@ -142,13 +156,13 @@ class ServiceConfig(BaseModel):
 
 class RoutingConfig(BaseModel):
     default_model: str = "deepseek-chat"
-    fallbacks: dict[str, list[str]] = Field(default_factory=dict)
+    fallbacks: dict[str, list[str]] = Field(default_factory=dict[str: Any])
 
 
 class AppConfig(BaseModel):
     bridge: BridgeConfig = Field(default_factory=BridgeConfig)
     humanize: HumanizeConfig = Field(default_factory=HumanizeConfig)
-    services: dict[str, ServiceConfig] = Field(default_factory=dict)
+    services: dict[str, ServiceConfig] = Field(default_factory=dict[str: Any])
     routing: RoutingConfig = Field(default_factory=RoutingConfig)
 
     @classmethod

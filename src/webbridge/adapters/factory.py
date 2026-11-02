@@ -8,6 +8,7 @@ from webbridge.session.manager import BrowserSession
 from .browser_base import BrowserChatAdapter
 from .claude import ClaudeAdapter
 from .deepseek import DeepSeekAdapter
+from .chatGPT import ChatGPTAdapter
 
 
 def create_adapter(
@@ -22,4 +23,6 @@ def create_adapter(
         return DeepSeekAdapter(name, service, session, humanize_cfg)
     if kind == "claude":
         return ClaudeAdapter(name, service, session, humanize_cfg)
+    if kind == "chatGPT":
+        return ChatGPTAdapter(name, service, session, humanize_cfg)
     return BrowserChatAdapter(name, service, session, humanize_cfg)

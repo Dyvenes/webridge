@@ -63,6 +63,21 @@
             "context": 200000,
             "output": 8192
           }
+        },
+
+
+
+        "chatGPT": {
+          "name": "chatGPT",
+          "capabilities": {
+            "tools": true,
+            "input": ["text"],
+            "output": ["text"]
+          },
+          "limit": {
+            "context": 200000,
+            "output": 8192
+          }
         }
       }
     }

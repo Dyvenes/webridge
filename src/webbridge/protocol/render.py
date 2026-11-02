@@ -14,17 +14,17 @@ _PROMPT_PATH = Path(__file__).parent / "prompts" / "system.md"
 # с содержимым файла, чтобы поведение не менялось при наличии/отсутствии файла.
 SYSTEM_PROMPT_FALLBACK = """\
 You are operating as a coding agent through a text-only channel.
-You can call tools. To call one or more tools, use dsml:
+You can call tools. To call one or more tools, use {{ tool format }}
 
-<｜｜DSML｜｜ calls>
-<｜｜DSML｜｜ invoke name="read">
-<｜｜DSML｜｜ parameter name="path" string="true">d:\PythonProjects\draft</｜｜DSML｜｜ parameter>
-</｜｜DSML｜｜ invoke>
-</｜｜DSML｜｜ calls>
+For any argument that contains code, multi-line text, or characters such as < > $ \ `
+use a raw argument: <arg name="content" raw="TOKEN"> on its own line, then the text
+exactly as it must appear, then a line containing only TOKEN, then </arg>.
+Choose a TOKEN that does not occur in the text (for example EOF7Q).
+Nothing inside a raw argument is escaped or interpreted.
 
 Rules:
 
-1) You may place several <call> elements in one tool block, but the whole
+1) You may place only one or two <call> elements in one tool block, but the whole
    tool block must be the last thing in your reply.
 2) Use only the tools listed below. Never invent tools.
 3) Arguments are raw text; do not escape them.
@@ -42,6 +42,40 @@ Rules:
 Available tools:
 {{ rendered tool list }}
 """
+
+_TOOL_FORMATS = {
+    "deepseek": 'dsml:\n'
+                '\n'
+                '<｜｜DSML｜｜ calls>\n'
+                '<｜｜DSML｜｜ invoke name="read">\n'
+                '<｜｜DSML｜｜ parameter name="path" string="true">d:\PythonProjects\draft</｜｜DSML｜｜ parameter>\n'
+                '</｜｜DSML｜｜ invoke>\n'
+                '</｜｜DSML｜｜ calls>\n',
+    "chatGPT": 'fenced blocks like this:\n'
+               '\n'
+               '```tool\n'
+               '<call name="TOOL_NAME">\n'
+               '<arg name="ARG_NAME">VALUE</arg>\n'
+               '</call>\n'
+               '<call name="OTHER_TOOL">\n'
+               '<arg name="ARG_NAME">VALUE</arg>\n'
+               '</call>\n'
+               '```\n'
+               'Write requests for files or anything similar not in verbal form, but exactly in the following format. '
+               'Then I will send you what you need to get to complete the task. Imagine this is a text‑based quest. '
+               'You are not allowed to use built‑in tools (searching in your local folders, etc.). You are only allowed'
+               ' to obtain information via text queries in the format specified above. I will provide you with everything you need.',
+    "default": 'fenced blocks like this:\n'
+               '\n'
+               '```tool\n'
+               '<call name="TOOL_NAME">\n'
+               '<arg name="ARG_NAME">VALUE</arg>\n'
+               '</call>\n'
+               '<call name="OTHER_TOOL">\n'
+               '<arg name="ARG_NAME">VALUE</arg>\n'
+               '</call>\n'
+               '```\n',
+}
 
 
 def _get(obj: Any, key: str, default: Any = None) -> Any:
@@ -127,10 +161,10 @@ def _schema_type(schema: Any) -> str:
 
 
 def _render_property(
-    name: str,
-    schema: Any,
-    required: bool,
-    indent: int,
+        name: str,
+        schema: Any,
+        required: bool,
+        indent: int,
 ) -> list[str]:
     """Рендерит свойство схемы и рекурсивно его вложенные свойства."""
     plain = _to_plain(schema)
@@ -360,8 +394,8 @@ def _render_message(msg: Any, name_map: Mapping[str, str] | None = None) -> str:
 
 
 def _render_transcript(
-    messages: list[Any],
-    name_map: Mapping[str, str] | None = None,
+        messages: list[Any],
+        name_map: Mapping[str, str] | None = None,
 ) -> str:
     blocks: list[str] = []
     for msg in messages or []:
@@ -371,11 +405,15 @@ def _render_transcript(
     return "\n\n".join(blocks)
 
 
-def _render_protocol(tools: list[Any] | None, tool_choice: Any = None) -> str:
+def _render_protocol(model: str, tools: list[Any] | None, tool_choice: Any = None) -> str:
     template = _load_template()
     rendered = template.replace("{{ rendered tool list }}", render_tools(tools))
+    if model not in _TOOL_FORMATS.keys():
+        tool_format = rendered.replace("{{ tool format }}", _TOOL_FORMATS["default"])
+    else:
+        tool_format = rendered.replace("{{ tool format }}", _TOOL_FORMATS[model])
     choice = render_tool_choice(tool_choice, tools)
-    rendered = rendered.replace("{{ tool choice }}", choice)
+    rendered = tool_format.replace("{{ tool choice }}", choice)
     if not choice:
         # Не оставляем лишнюю пустую строку от необязательной инструкции.
         rendered = re.sub(r"\n{3,}", "\n\n", rendered)
@@ -383,12 +421,13 @@ def _render_protocol(tools: list[Any] | None, tool_choice: Any = None) -> str:
 
 
 def render_initial(
-    messages: list[Any],
-    tools: list[Any] | None = None,
-    tool_choice: Any = None,
+        messages: list[Any],
+        model: str,
+        tools: list[Any] | None = None,
+        tool_choice: Any = None,
 ) -> str:
     """Первое сообщение нового веб-чата: системная инструкция + весь транскрипт."""
-    protocol = _render_protocol(tools, tool_choice)
+    protocol = _render_protocol(model, tools, tool_choice)
     transcript = _render_transcript(messages, tool_name_map(messages))
     if transcript:
         return f"{protocol}\n\n---\n\n{transcript}"
@@ -396,18 +435,18 @@ def render_initial(
 
 
 def render_tools_update(
-    tools: list[Any] | None,
-    tool_choice: Any = None,
+        tools: list[Any] | None,
+        tool_choice: Any = None,
 ) -> str:
     """Секция обновления инструментов для существующего веб-чата."""
     return "[System update]\n" + _render_protocol(tools, tool_choice)
 
 
 def render_delta(
-    messages: list[Any],
-    tools_update: list[Any] | None = None,
-    tool_choice: Any = None,
-    name_map: Mapping[str, str] | None = None,
+        messages: list[Any],
+        tools_update: list[Any] | None = None,
+        tool_choice: Any = None,
+        name_map: Mapping[str, str] | None = None,
 ) -> str:
     """Сообщения, которые добавляются к уже существующему веб-чату."""
     mapping: dict[str, str] = dict(name_map or {})

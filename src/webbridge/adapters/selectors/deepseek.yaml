@@ -47,6 +47,10 @@ stop_button:
   - 'button[aria-label="Stop generating"]'
   - 'button[aria-label="Stop response"]'
   - 'button[data-testid="stop"]'
+continue_button:
+  - '[role="button"].ds-button--outlinedNeutral:has-text("Continue")'
+  - '[role="button"].ds-button--capsule:has-text("Continue")'
+  - '[role="button"].ds-button--capsule:has-text("继续")'
 
 # Сообщения
 user_message:

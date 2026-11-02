@@ -1,0 +1,135 @@
+version: 1
+
+# ============================================================
+# ChatGPT (chatgpt.com) — новая UI с Codex-интеграцией.
+# Селекторы собраны по снимку страницы https://chatgpt.com/c/6ae7dce0-...
+# от 2026-11-02. Где без aria-label не обойтись — учтена русская локаль,
+# английские варианты даны запасными.
+# ============================================================
+
+# Индикаторы состояния
+logged_in_indicator:
+  - 'div.ProseMirror[contenteditable="true"][role="textbox"]'
+  - 'form[data-chatgpt-composer]'
+  - 'nav[aria-label="История чатов"]'
+  - 'button[aria-label="Открыть меню профиля"]'
+
+login_page_indicator:
+  - 'input[name="email"]'
+  - 'button:has-text("Continue with email")'
+  - 'button:has-text("Продолжить с email")'
+
+captcha_indicator:
+  - 'iframe[src*="captcha"]'
+  - 'text=/verify you are human/i'
+  - 'text=/checking your browser/i'
+  - 'text=/подтвердите, что вы человек/i'
+
+rate_limit_banner:
+  - 'text=/message limit|usage limit|try again later|out of messages/i'
+  - 'text=/лимит сообщений|лимит использования|попробуйте позже|сообщения закончились/i'
+
+# ============================================================
+# Чат
+# ============================================================
+
+new_chat_button:
+  - 'button[aria-label="Новый чат"]'
+  - 'button[aria-label="New chat"]'
+  - 'a[href$="/"]'
+
+# Composer. Основной якорь — contenteditable ProseMirror с role=textbox.
+# aria-label "Спросить ChatGPT" локализован, но data-composer-markdown стабилен.
+input:
+  - 'div.ProseMirror[contenteditable="true"][role="textbox"]'
+  - 'div[contenteditable="true"][data-composer-markdown]'
+  - 'div[contenteditable="true"][aria-label="Спросить ChatGPT"]'
+  - 'div[contenteditable="true"][data-virtualkeyboard="true"]'
+  - '#prompt-textarea'
+  - 'textarea'
+
+# Кнопка отправки. В снимке отсутствует (поле пустое — вместо неё
+# "Начать голосовой разговор"). Оставляем стандартный набор ChatGPT;
+# на живой отправке это надо подтвердить и, если что, заменить.
+send_button:
+  - 'button[data-testid="send-button"]'
+  - 'button[aria-label="Send prompt"]'
+  - 'button[aria-label="Отправить сообщение"]'
+  - 'button[aria-label="Send message"]'
+
+# Кнопка "Стоп". В снимке нет активной генерации — восстановить нельзя.
+stop_button:
+  - 'button[data-testid="stop-button"]'
+  - 'button[aria-label="Stop streaming"]'
+  - 'button[aria-label="Остановить"]'
+  - 'button[aria-label="Stop generating"]'
+
+# Сообщения. В новой UI ChatGPT нет data-message-author-role.
+# Есть data-chatgpt-search-unit-key / data-content-search-unit-key с суффиксом.
+user_message:
+  - '[data-chatgpt-search-unit-key$=":user"]'
+  - '[data-content-search-unit-key$=":user"]'
+  - '[data-user-message-bubble="true"]'
+  - 'div[data-message-author-role="user"]'
+
+assistant_message:
+  - '[data-chatgpt-search-unit-key$=":assistant"]'
+  - '[data-content-search-unit-key$=":assistant"]'
+  - 'div[data-message-author-role="assistant"]'
+
+assistant_streaming:
+  - '[data-chatgpt-search-unit-key$=":assistant"] [data-is-streaming="true"]'
+
+assistant_done:
+  - '[data-chatgpt-search-unit-key$=":assistant"] [data-is-streaming="false"]'
+
+# Копировать. У кнопки копирования всей реплики — aria-label "Копировать"
+# (локализован). У кнопки копирования блока кода — "Копировать код"
+# и data-testid="code-block-copy". Рекомендуется искать внутри assistant_message,
+# иначе поймает первую кнопку на странице.
+copy_button_in_message:
+  - 'button[aria-label="Копировать"][data-state="closed"]'
+  - 'button[aria-label="Копировать сообщение"]'
+  - 'button[aria-label="Copy"]'
+  - 'button[data-testid="code-block-copy"]'
+
+# ============================================================
+# Файлы
+# ============================================================
+
+# Четыре инпута: "Сделать фото", "Прикрепить фото или видео",
+# "Прикрепить фото", "Прикрепить файлы". Берём последний — он общий.
+file_input:
+  - 'input[aria-label="Прикрепить файлы"]'
+  - 'input[aria-label="Прикрепить файл"]'
+  - 'input[type="file"][multiple]'
+
+# ============================================================
+# Навигация по боковой панели
+# ============================================================
+
+sidebar_search:
+  - 'button[aria-label="Поиск"]'
+  - 'button[aria-label="Search"]'
+
+sidebar_library:
+  - 'button[aria-label="Библиотека"]'
+  - 'button[aria-label="Library"]'
+
+sidebar_history_nav:
+  - 'nav[aria-label="История чатов"]'
+  - 'nav[aria-label="Chat history"]'
+
+sidebar_history_link:
+  - 'a[data-interactive-row-link="true"]'
+  - 'a[href^="https://chatgpt.com/c/"]'
+
+# ============================================================
+# Основной контейнер
+# ============================================================
+
+chat_container:
+  - '[role="region"][aria-label="Разговор"]'
+  - '[data-app-action-timeline-scroll]'
+  - '[data-chatgpt-conversation-selection-target]'
+  - 'main'

@@ -1,67 +1,121 @@
 version: 1
 
-# Индикаторы состояния
+# Индикаторы состояния.
+# Везде, где можно, первый селектор — по data-testid (не зависит от локали).
+# Где без aria-label не обойтись — добавлены и английский, и русский варианты:
+# у вас интерфейс локализован, и старые английские ярлыки в этой вкладке не совпадут.
+
 logged_in_indicator:
-  - 'div[contenteditable="true"]'
-  - 'fieldset'
+  - 'div[contenteditable="true"][data-testid="chat-input"]'
+  - 'button[data-testid="user-menu-button"]'
+  - 'div[contenteditable="true"].ProseMirror'
+  - 'fieldset[data-perf-region="composer"]'
   - 'button[aria-label="Send message"]'
+  - 'button[aria-label="Отправить сообщение"]'
+
 login_page_indicator:
   - 'input[name="email"]'
   - 'button:has-text("Continue with email")'
+  - 'button:has-text("Продолжить с email")'
+
 captcha_indicator:
   - 'iframe[src*="captcha"]'
   - 'text=/verify you are human/i'
   - 'text=/checking your browser/i'
+  - 'text=/подтвердите, что вы человек/i'
+  - 'text=/проверяем ваш браузер/i'
+
 rate_limit_banner:
   - 'text=/message limit|usage limit|try again later|out of messages/i'
+  - 'text=/лимит сообщений|лимит использования|попробуйте позже|сообщения закончились/i'
 
 # Чат
+
+# В реальном DOM href абсолютный (https://claude.ai/new), поэтому a[href="/new"]
+# не совпадёт. Используем $= и *=.
 new_chat_button:
-  - 'a[href="/new"]'
+  - 'a[href$="/new"]'
+  - 'a[href*="claude.ai/new"]'
   - 'button[aria-label="New chat"]'
-  - 'a:has-text("New chat")'
+  - 'button[aria-label="Новый чат"]'
+
 input:
+  - 'div[contenteditable="true"][data-testid="chat-input"]'
   - 'div[contenteditable="true"].ProseMirror'
-  - 'div[contenteditable="true"][data-placeholder]'
+  - 'div[contenteditable="true"][role="textbox"]'
   - 'div[contenteditable="true"]'
   - 'textarea'
-send_button:
-  - 'button[aria-label="Send message"]'
-  - 'button[aria-label="Send Message"]'
-  - 'button[data-testid="send-button"]'
-stop_button:
-  - 'button[aria-label="Stop response"]'
-  - 'button[aria-label="Stop Response"]'
-  - 'button[data-testid="stop-button"]'
 
-# Сообщения
+# Внимание: кнопка disabled, пока поле пустое. Перед кликом проверяйте
+# :not([disabled]).
+send_button:
+  - 'button[data-testid="chat-input-send"]'
+  - 'button[aria-label="Send message"]'
+  - 'button[aria-label="Отправить сообщение"]'
+  - 'button[data-testid="send-button"]'
+
+# Не подтверждено на живой генерации: в присланном HTML ответ уже завершён.
+# Основная гипотеза — chat-input-stop (по аналогии с chat-input-send),
+# плюс локализованные aria-label. Если у вас есть DevTools во время
+# стриминга — снимите реальный селектор и замените.
+stop_button:
+  - 'button[data-testid="chat-input-stop"]'
+  - 'button[aria-label="Stop response"]'
+  - 'button[aria-label="Остановить ответ"]'
+  - 'button[aria-label="Остановить генерацию"]'
+  - '[data-cds-part="send-slot"]:not([inert]) button:not([data-testid="chat-input-send"])'
+
+# Сообщения.
+# data-testid="user-message" в текущем DOM НЕТ — это был устаревший селектор.
+# Пользовательское сообщение помечено data-cds="UserMessage".
 user_message:
-  - 'div[data-testid="user-message"]'
-  - '.font-user-message'
-  - '[data-message-author-role="user"]'
+  - 'div[data-cds="UserMessage"]'
+  - '[data-testid="transcript-row"][data-perf-row="human"] div[data-cds="UserMessage"]'
+
 assistant_message:
   - 'div[data-testid="assistant-message"]'
-  - '.font-claude-message'
-  - '[data-message-author-role="assistant"]'
+  - 'div[data-cds="AssistantMessage"]'
   - 'div[data-is-streaming]'
+  - '[data-testid="transcript-row"][data-perf-row="assistant"] div[data-cds="AssistantMessage"]'
+
+# Самый надёжный сигнал конца генерации: data-is-streaming переключается
+# false -> true -> false.
+assistant_streaming:
+  - 'div[data-testid="assistant-message"][data-is-streaming="true"]'
+
+assistant_done:
+  - 'div[data-testid="assistant-message"][data-is-streaming="false"]'
+
+# У кнопки «копировать всё сообщение» нет data-testid — только aria-label.
+# У кнопки копирования блока кода есть data-testid="code-block-copy".
 copy_button_in_message:
-  - 'button[aria-label="Copy"]'
+  - '[data-testid="message-actions"] button[aria-label="Copy"]'
+  - '[data-testid="message-actions"] button[aria-label="Копировать"]'
+  - 'button[data-testid="code-block-copy"]'
   - 'button[data-testid="copy-button"]'
 
 # Файлы
 file_input:
+  - 'input[data-testid="file-upload"]'
   - 'input[type="file"]'
 
-# Выбор модели
+# Выбор модели.
+# В DOM у кнопки data-testid="model-selector-dropdown",
+# а aria-label локализован ("Модель: Sonnet 5.5 Низкий"), поэтому
+# [aria-label*="model" i] на этой странице не совпадёт.
 model_picker_open:
-  - 'button[data-testid="model-selector"]'
+  - 'button[data-testid="model-selector-dropdown"]'
+  - 'button[data-testid^="model-selector"]'
   - 'button[aria-label*="model" i]'
-  - 'button:has-text("Claude")'
+  - 'button[aria-label*="Модель" i]'
+
 model_picker_option:
   - '[role="option"]:has-text("{model}")'
   - '[role="menuitem"]:has-text("{model}")'
   - 'text="{model}"'
 
 chat_container:
+  - 'main.dframe-content'
+  - '[data-testid="transcript-list"]'
+  - '[role="feed"][aria-label="Сообщения в чате"]'
   - 'main'
-  - '[data-testid="conversation"]'

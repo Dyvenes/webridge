@@ -61,7 +61,7 @@ from webbridge.errors import (
 )
 from webbridge.limits.budget import BudgetManager
 from webbridge.observability.logging import get_logger
-from webbridge.protocol.parse import has_tool_block, parse_tool_calls, strip_tool_blocks, looks_like_broken_tool_call
+from webbridge.protocol.parse import has_tool_block, parse_tool_calls, strip_tool_blocks, looks_like_broken_tool_call, tool_call_truncated
 from webbridge.protocol.render import (
     render_delta,
     render_initial,
@@ -76,11 +76,29 @@ MAX_TOOL_REPAIRS = 2
 
 _TOOL_REPAIR_PROMPT = (
     "System notice: your last reply contained a tool call that could not be parsed "
-    "({problem}). Repeat ONLY the tool call in the required format: a fenced block "
-    "opened by a line ```tool, then <call name=\"...\"><arg name=\"...\">...</arg></call>, "
-    "then a closing ``` line. Do not use DSML or any other tags."
+    "({problem}). Repeat ONLY the tool call in the required format: {required_format}"
 )
 
+_REQUIRED_FORMATS = {
+    "deepseek": "DSML",
+    "default": "xml",
+}
+
+_TOOL_TRUNCATED_PROMPT = (
+    "System notice: your last reply was cut off by the output length limit, so the "
+    "tool call was incomplete and was NOT executed. Do not resend the same large "
+    "content. Make smaller calls: write the file with the first part only (at most "
+    "20000 characters, ending with a marker comment such as "
+    "# PART2_HERE), then continue with separate edit calls that replace the marker "
+    "with the next part and a new marker. Or split the code into several smaller files."
+)
+
+_TOOL_DEGENERATE_PROMPT = (
+    "System notice: your last reply degenerated into repeated closing tags and was "
+    "discarded; nothing was executed. Reply again with ONE tool call only, in this "
+    "format: a line ```tool, then <call name=\"...\"><arg name=\"...\">...</arg></call>, "
+    "then a line ```. Do not use DSML tags and do not output several calls at once."
+)
 
 def _request_id(headers: dict[str, str]) -> str:
     return headers.get("x-request-id") or f"req_{uuid.uuid4().hex[:12]}"
@@ -362,12 +380,12 @@ class Turn:
         await self.service.store.update_session_chat(self.session_id, self.handle.chat_url)
 
         seed = self.incoming
-        text = render_initial(seed, self.req.tools, self.req.tool_choice)
+        text = render_initial(seed, self.req.model, self.req.tools, self.req.tool_choice)
         if self._too_large(text) or estimate_tokens(json.dumps(seed, ensure_ascii=False)) > int(
             self.service_cfg.context_window * 0.8
         ):
             seed = truncate_history(seed, int(self.service_cfg.limits.max_message_chars * 0.9))
-            text = render_initial(seed, self.req.tools, self.req.tool_choice)
+            text = render_initial(seed, self.req.model, self.req.tools, self.req.tool_choice)
 
         if self._too_large(text):
             raise MessageTooLong(self.service_cfg.limits.max_message_chars, len(text))
@@ -414,7 +432,7 @@ class Turn:
             self.finish_reason = finish
             return message
         except Exception as exc:
-            await self._fail(exc, reset=True)
+            await self._fail(exc, reset=not isinstance(exc, ProtocolError))
             raise
 
     async def _build_response(self, text: str) -> tuple[dict[str, Any], str]:
@@ -508,6 +526,10 @@ class Turn:
         if self.failed:
             return
         self.failed = True
+
+        if isinstance(exc, (RateLimited, CaptchaRequired)):
+            self.service._cooldown_until[self.service_name] = time.monotonic() + 600
+
         if self.turn_id:
             await self.service.store.fail_turn(
                 self.turn_id,
@@ -632,7 +654,7 @@ class Turn:
             await self._fail(WebBridgeError("client disconnected during stream"), reset=True)
             raise
         except Exception as exc:
-            await self._fail(exc, reset=True)
+            await self._fail(exc, reset=not isinstance(exc, ProtocolError))
             log.error(
                 "stream_failed",
                 session_id=self.session_id,
@@ -664,11 +686,17 @@ class Turn:
         return text
 
     async def _tool_reply(self) -> tuple[dict[str, Any], str]:
-        """Читает ответ; при битом вызове просит модель повторить (до MAX_TOOL_REPAIRS раз)."""
         text = await self._read_stream()
+        log.info(f"TOOL REQUEST:\n{text}")
         for attempt in range(MAX_TOOL_REPAIRS + 1):
+            degenerate = bool(self.handle.meta.pop("degenerate", False))
+            truncated = tool_call_truncated(text)
             problem = ""
-            if looks_like_broken_tool_call(text):
+            if degenerate:
+                problem = "degenerate"
+            elif truncated:
+                problem = "truncated"
+            elif looks_like_broken_tool_call(text):
                 problem = "no valid tool block found"
             else:
                 try:
@@ -678,14 +706,26 @@ class Turn:
                         raise
                     problem = str(exc)
             if attempt == MAX_TOOL_REPAIRS:
-                break  # сдаёмся: отдаём как обычный текст
+                if problem in ("degenerate", "truncated"):
+                    raise ProtocolError(f"tool call {problem}", raw_text=text)
+                break
             log.warning(
                 "tool_call_repair",
                 session_id=self.session_id,
                 attempt=attempt + 1,
                 problem=problem,
+                reply_chars=len(text),
             )
-            await self.adapter.send(self.handle, _TOOL_REPAIR_PROMPT.format(problem=problem))
+            if problem == "degenerate":
+                prompt = _TOOL_DEGENERATE_PROMPT
+            elif problem == "truncated":
+                prompt = _TOOL_TRUNCATED_PROMPT
+            else:
+                if self.req.model not in _REQUIRED_FORMATS.keys():
+                    prompt = _TOOL_REPAIR_PROMPT.format(problem=problem, required_format=_REQUIRED_FORMATS["default"])
+                else:
+                    prompt = _TOOL_REPAIR_PROMPT.format(problem=problem, required_format=_REQUIRED_FORMATS[self.req.model])
+            await self.adapter.send(self.handle, prompt)
             text = await self._read_stream()
         return await self._build_response(text)
 
@@ -745,6 +785,7 @@ class ConversationService:
         self.router = router
         self.budget = budget
         self._locks: dict[str, asyncio.Lock] = {}
+        self._cooldown_until: dict[str, float] = {}
 
     def _lock_for(self, session_id: str) -> asyncio.Lock:
         lock = self._locks.get(session_id)
@@ -792,6 +833,9 @@ class ConversationService:
             )
             turn.req.request_id = _request_id(headers)  # type: ignore[attr-defined]
             return turn
+
+        if time.monotonic() < self._cooldown_until.get(route.service_name, 0.0):
+            raise RateLimited(route.service_name)
 
         status = await route.adapter.ensure_session()
         if status != "OK":
